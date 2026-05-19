@@ -951,6 +951,15 @@ static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
     if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
 
     fpext96_t ea(a), eb(b);
+    // If the exponent difference exceeds fpext96_t's mantissa+extension
+    // bits (96), the smaller operand can't influence the result through
+    // fpext96_t's alignment shift — but the operation is still inexact
+    // and the result rounds toward the larger operand. Track PE here
+    // (fpext96_t::add_values loses this information internally).
+    int aexp = ea.exponent(), bexp = eb.exponent();
+    int exp_diff = aexp - bexp;
+    if (exp_diff < 0) exp_diff = -exp_diff;
+    if (exp_diff > 64) flags |= X87SW_PRECISION_EX;
     fpext96_t result;
     result.add(ea, eb);
     dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
