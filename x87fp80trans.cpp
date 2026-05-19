@@ -447,7 +447,9 @@ static fp80_t int32_to_fp80(int32_t v)
 // Zero → dst1 = src, dst2 = -inf, sets #Z.
 // Infinity → dst1 = src, dst2 = +inf.
 //
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#if defined(X87_FORCE_HAND_ROLLED)
+#define X87_HOST_HAS_FP80 0
+#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #define X87_HOST_HAS_FP80 1
 #else
 #define X87_HOST_HAS_FP80 0

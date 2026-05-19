@@ -48,9 +48,13 @@
 // finite arithmetic paths so the host x87 unit (with its rounding mode
 // and PC bits set via x87setcw / fldcw) does the actual math at the same
 // precision the test oracle would. On non-x86 hosts this falls back to
-// the existing fpext96_t-based path, which is precision-limited but
-// works for values in fp64 range.
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+// the existing fpext96_t-based path, which implements the spec by hand.
+//
+// X87_FORCE_HAND_ROLLED can be defined at build time to force the
+// hand-rolled fallback on x86 hosts (for testing the spec implementation).
+#if defined(X87_FORCE_HAND_ROLLED)
+  #define X87_HOST_HAS_FP80 0
+#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
   #define X87_HOST_HAS_FP80 1
 #else
   #define X87_HOST_HAS_FP80 0
@@ -565,13 +569,154 @@ bool fp80_t::operator>=(fp80_t const &rhs) const { int c = compare_fp80_3way(*th
 
 //===========================================================================
 //
+// Read the current x87 control word.
+//
+// fpround_t::get/set work on MXCSR, but the x87 unit and the test harness's
+// x87setcw operate on the separate x87 CW (via fldcw/fstcw). We need the
+// latter for rounding decisions in hand-rolled arithmetic.
+//
+//===========================================================================
+static x87cw_t read_x87_cw()
+{
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+    uint16_t cw;
+    __asm__ volatile("fnstcw %0" : "=m"(cw));
+    return cw;
+#else
+    return X87CW_PRECISION_EXTENDED | X87CW_ROUNDING_NEAREST | X87CW_MASK_ALL_EX;
+#endif
+}
+
+
+//===========================================================================
+//
+// Round a 96-bit fpext96_t value to fp80 per the supplied control word.
+// Sets PE if precision was lost, C1 if the result was rounded up (magnitude
+// increased), OE/UE on overflow/underflow.
+//
+// PC field of CW dictates the rounding position:
+//   PC=11 (extended 64-bit): round at the 32-bit extension
+//   PC=10 (double   53-bit): round at bit 11 of mantissa + the extension
+//   PC=00 (single   24-bit): round at bit 40 of mantissa + the extension
+//
+//===========================================================================
+static fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &out_sw)
+{
+    bool neg = v.sign() != 0;
+    uint16_t sign_bit = neg ? FP80_SIGN_MASK : 0;
+    if (v.iszero()) return fp80_t(0, sign_bit);
+
+    uint64_t mant = v.mantissa();
+    uint32_t ext = v.extend();
+    int      exp = v.exponent();
+
+    x87cw_t rmode = cw & X87CW_ROUNDING_MASK;
+    x87cw_t pc    = cw & X87CW_PRECISION_MASK;
+
+    // Number of bits of mantissa precision to keep (including the explicit-1).
+    int keep_bits = (pc == X87CW_PRECISION_SINGLE) ? 24
+                  : (pc == X87CW_PRECISION_DOUBLE) ? 53
+                  : 64;
+    int drop_in_mant = 64 - keep_bits;   // bits to discard from the bottom of mant
+
+    // Compute round + sticky.  The "round bit" is the highest bit being
+    // discarded; "sticky" is the OR of everything below that.
+    bool round, sticky;
+    if (drop_in_mant > 0)
+    {
+        round  = (mant >> (drop_in_mant - 1)) & 1;
+        uint64_t below_mask = (drop_in_mant >= 2) ? ((1ull << (drop_in_mant - 1)) - 1) : 0;
+        sticky = (mant & below_mask) != 0 || ext != 0;
+        mant  &= ~((1ull << drop_in_mant) - 1);   // truncate
+    }
+    else  // drop_in_mant == 0, only the 32 extension bits below
+    {
+        round  = (ext >> 31) & 1;
+        sticky = (ext & 0x7FFFFFFFu) != 0;
+    }
+
+    bool inexact = round || sticky;
+    bool round_up = false;
+    if (inexact)
+    {
+        if (rmode == X87CW_ROUNDING_NEAREST)
+        {
+            // Round-to-nearest-even: round up if round=1 and (sticky=1 or LSB=1).
+            uint64_t lsb = (drop_in_mant > 0) ? ((mant >> drop_in_mant) & 1) : (mant & 1);
+            round_up = round && (sticky || lsb);
+        }
+        else if (rmode == X87CW_ROUNDING_DOWN) round_up = neg;
+        else if (rmode == X87CW_ROUNDING_UP)   round_up = !neg;
+        // ROUND_ZERO: never round up
+    }
+
+    if (round_up)
+    {
+        if (drop_in_mant > 0)
+            mant += (1ull << drop_in_mant);
+        else
+            mant += 1;
+        if (mant == 0)  // overflowed to 2.0
+        {
+            mant = FP80_EXPLICIT_ONE;
+            exp += 1;
+        }
+        out_sw |= X87SW_C1;
+    }
+    if (inexact) out_sw |= X87SW_PRECISION_EX;
+
+    int biased = exp + FP80_EXPONENT_BIAS;
+    if (biased >= FP80_EXPONENT_MAX_BIASED)
+    {
+        out_sw |= X87SW_OVERFLOW_EX | X87SW_PRECISION_EX;
+        // For ROUND_ZERO and "toward the other direction" the result is the
+        // largest representable finite value, not infinity.
+        bool to_max_finite =
+            rmode == X87CW_ROUNDING_ZERO ||
+            (rmode == X87CW_ROUNDING_DOWN && !neg) ||
+            (rmode == X87CW_ROUNDING_UP   && neg);
+        if (to_max_finite)
+        {
+            uint64_t maxm = ~((1ull << drop_in_mant) - 1);  // largest with PC zeroes
+            return fp80_t(maxm, sign_bit | uint16_t(FP80_EXPONENT_MAX_BIASED - 1));
+        }
+        return fp80_t(FP80_EXPLICIT_ONE, sign_bit | FP80_EXPONENT_MAX_BIASED);
+    }
+    if (biased <= 0)
+    {
+        // Denormalize: shift mantissa right. Underflow is reported only if
+        // any bits are lost in the shift (i.e., the denormal result is
+        // inexact); otherwise just emit the exact denormal.
+        int shift = 1 - biased;
+        if (shift >= 64)
+        {
+            out_sw |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+            out_sw &= ~X87SW_C1;          // no upward direction when going to 0
+            return fp80_t(0, sign_bit);
+        }
+        uint64_t lost_mask = (1ull << shift) - 1;
+        bool denorm_inexact = (mant & lost_mask) != 0;
+        uint64_t result_mant = mant >> shift;
+        if (denorm_inexact)
+            out_sw |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+        // If already inexact from primary rounding, UE fires too.
+        if (out_sw & X87SW_PRECISION_EX)
+            out_sw |= X87SW_UNDERFLOW_EX;
+        return fp80_t(result_mant, sign_bit);
+    }
+    return fp80_t(mant, sign_bit | uint16_t(biased));
+}
+
+
+//===========================================================================
+//
 // 80-bit arithmetic.
 //
 // On x86 hosts we copy into/out of `long double` and let the host x87 unit
 // do the actual computation; this gives us bit-exact results that match
 // the test oracle (which is the same x87 unit) without re-deriving 80-bit
 // IEEE rounding by hand. On non-x86 hosts the same routines fall back to
-// the fpext96_t-based path; rounding/PC are not fully honored there.
+// the fpext96_t-based path with the round_fpext96_to_fp80 helper above.
 //
 //===========================================================================
 
@@ -794,13 +939,13 @@ static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
             dst = a;
         else
         {
-            x87cw_t r = fpround_t::get() & X87CW_ROUNDING_MASK;
+            x87cw_t r = read_x87_cw() & X87CW_ROUNDING_MASK;
             dst = (r == X87CW_ROUNDING_DOWN) ? fp80_t::const_nzero() : fp80_t::const_zero();
         }
         return 0;
     }
-    if (a.iszero()) { dst = b; return 0; }
-    if (b.iszero()) { dst = a; return 0; }
+    if (a.iszero()) { dst = b; return b.isdenorm() ? X87SW_DENORM_EX : 0; }
+    if (b.iszero()) { dst = a; return a.isdenorm() ? X87SW_DENORM_EX : 0; }
 
     uint16_t flags = 0;
     if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
@@ -808,12 +953,7 @@ static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
     fpext96_t ea(a), eb(b);
     fpext96_t result;
     result.add(ea, eb);
-    dst = result.as_fp80();
-
-    if (dst.isinf())                              flags |= X87SW_OVERFLOW_EX  | X87SW_PRECISION_EX;
-    else if (dst.iszero() && !(a.iszero() || b.iszero()))
-                                                  flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
-    else if (dst.isdenorm())                      flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+    dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
     return flags;
 }
 
@@ -845,11 +985,7 @@ static uint16_t do_mul(fp80_t a, fp80_t b, fp80_t &dst)
 
     fpext96_t ea(a), eb(b), result;
     result.mul(ea, eb);
-    dst = result.as_fp80();
-
-    if (dst.isinf())                              flags |= X87SW_OVERFLOW_EX  | X87SW_PRECISION_EX;
-    else if (dst.iszero())                        flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
-    else if (dst.isdenorm())                      flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+    dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
     return flags;
 }
 
@@ -896,38 +1032,36 @@ static uint16_t do_div(fp80_t a, fp80_t b, fp80_t &dst)
     if (a.isdenorm()) { int s = count_leading_zeros64(a_mant); a_mant <<= s; a_exp = 1 - FP80_EXPONENT_BIAS - s; }
     if (b.isdenorm()) { int s = count_leading_zeros64(b_mant); b_mant <<= s; b_exp = 1 - FP80_EXPONENT_BIAS - s; }
 
-    // 128-bit / 64-bit: shift the numerator up 63 bits so the 64-bit
-    // quotient sits at a known precision.
-    unsigned __int128 num = (unsigned __int128)a_mant << 63;
-    uint64_t quot = uint64_t(num / b_mant);
-    unsigned __int128 prod = (unsigned __int128)quot * b_mant;
-    bool inexact = (num != prod);
+    // Produce a 96-bit fpext96-equivalent quotient in two stages so the
+    // 128-bit intermediates never overflow.
+    //   Stage 1: quot64 = (a_mant << 63) / b_mant
+    //            → 64-bit quotient with explicit-1 at bit 63 or 64.
+    //   Stage 2: ext32 = (remainder << 32) / b_mant
+    //            → next 32 bits of precision.
+    unsigned __int128 num1 = (unsigned __int128)a_mant << 63;
+    uint64_t          quot = uint64_t(num1 / b_mant);
+    unsigned __int128 rem1 = num1 - (unsigned __int128)quot * b_mant;
+
+    unsigned __int128 num2 = rem1 << 32;
+    uint32_t          ext  = uint32_t(num2 / b_mant);
+    unsigned __int128 rem2 = num2 - (unsigned __int128)ext * b_mant;
+    bool inexact = (rem2 != 0);
 
     int result_exp = a_exp - b_exp;
-    // The quotient is either [1, 2) or [2, 4) at this point depending on
-    // a_mant vs b_mant. Normalize so the explicit 1 is at bit 63.
-    if ((quot & (1ull << 63)) == 0)
+    // quot has its top bit at position 63 if a_mant >= b_mant, else 62.
+    // Normalize so the explicit-1 sits at position 63.
+    if ((quot & FP80_EXPLICIT_ONE) == 0)
     {
-        quot <<= 1;
+        quot = (quot << 1) | (ext >> 31);
+        ext  = (ext << 1) | (inexact ? 0 : 0);   // ext low bit stays 0 (we tracked sticky separately)
         result_exp -= 1;
-        // We need an extra bit; if there was a remainder it's now sticky.
-        // (Approximation: ignore the extra round bit; precision loss tracked
-        // via PE flag.)
     }
-    result_exp += FP80_EXPONENT_BIAS;
+    // Pack sticky into the low bit of ext so round_fpext96_to_fp80 picks it up.
+    uint32_t ext_packed = ext | (inexact ? 1 : 0);
 
-    if (result_exp >= FP80_EXPONENT_MAX_BIASED)
-    {
-        dst = fp80_t(FP80_EXPLICIT_ONE, result_sign | FP80_EXPONENT_MAX_BIASED);
-        return flags | X87SW_OVERFLOW_EX | X87SW_PRECISION_EX;
-    }
-    if (result_exp <= 0)
-    {
-        dst = fp80_t(0, result_sign);
-        return flags | X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
-    }
-    dst = fp80_t(quot, result_sign | uint16_t(result_exp));
-    return flags | (inexact ? X87SW_PRECISION_EX : 0);
+    fpext96_t r(quot, ext_packed, result_exp, (result_sign != 0) ? 1 : 0);
+    dst = round_fpext96_to_fp80(r, read_x87_cw(), flags);
+    return flags;
 }
 
 // Asm convention notes (matching the order ARG1->ST(0), ARG2->ST(1)):
