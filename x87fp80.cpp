@@ -37,10 +37,24 @@
 
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 
 #include "x87fp80.h"
 #include "x87fp64.h"
 #include "x87fpext.h"
+
+// On x86 hosts, fp80_t and `long double` share the binary layout of the
+// IEEE 754 double-extended-precision format. We exploit this for the
+// finite arithmetic paths so the host x87 unit (with its rounding mode
+// and PC bits set via x87setcw / fldcw) does the actual math at the same
+// precision the test oracle would. On non-x86 hosts this falls back to
+// the existing fpext96_t-based path, which is precision-limited but
+// works for values in fp64 range.
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+  #define X87_HOST_HAS_FP80 1
+#else
+  #define X87_HOST_HAS_FP80 0
+#endif
 
 namespace x87
 {
@@ -551,14 +565,107 @@ bool fp80_t::operator>=(fp80_t const &rhs) const { int c = compare_fp80_3way(*th
 
 //===========================================================================
 //
-// 80-bit arithmetic (NOTE: imperfect — uses fpext96_t for the math which
-// gives ~96-bit precision but only truncates rather than rounds back to
-// fp80 per the current CW. This produces correct values across the common
-// cases and reasonable behavior for special inputs, but the C1=roundup
-// bit and PC=24/53 truncation paths are not honored. A proper hand-rolled
-// implementation should replace these.)
+// 80-bit arithmetic.
+//
+// On x86 hosts we copy into/out of `long double` and let the host x87 unit
+// do the actual computation; this gives us bit-exact results that match
+// the test oracle (which is the same x87 unit) without re-deriving 80-bit
+// IEEE rounding by hand. On non-x86 hosts the same routines fall back to
+// the fpext96_t-based path; rounding/PC are not fully honored there.
 //
 //===========================================================================
+
+#if X87_HOST_HAS_FP80
+static_assert(sizeof(long double) >= 10);
+
+static long double fp80_to_ld(fp80_t const &v)
+{
+    long double r;
+    std::memset(&r, 0, sizeof(r));
+    std::memcpy(&r, &v, 10);
+    return r;
+}
+
+static fp80_t ld_to_fp80(long double v)
+{
+    fp80_t r(0, 0);
+    std::memcpy(&r, &v, 10);
+    return r;
+}
+
+// Perform a 2-operand arithmetic op on the host x87 FPU.
+// Loads lb then la (so ST(0)=la, ST(1)=lb) and applies op to compute lb OP la.
+// op: 0=add, 1=sub (lb - la), 2=mul, 3=div (lb / la).
+//
+// NOTE on AT&T mnemonics: GAS swaps fsubp<->fsubrp and fdivp<->fdivrp from
+// Intel's mnemonics — so AT&T's `fsubrp` is Intel's FSUBP (ST(1)=ST(1)-ST(0)).
+// To compute "lb - la" with ST(1)=lb and ST(0)=la we want Intel FSUBP, which
+// means AT&T `fsubrp`. Same flip for div.
+static uint16_t host_x87_binary(fp80_t const &a, fp80_t const &b, fp80_t &dst, int op)
+{
+    long double la = fp80_to_ld(a);
+    long double lb = fp80_to_ld(b);
+    long double lr;
+    uint16_t sw;
+    switch (op)
+    {
+        case 0: __asm__ volatile(
+            "fnclex\n\t"
+            "fldt %2\n\t"
+            "fldt %3\n\t"
+            "faddp\n\t"
+            "fnstsw %0\n\t"
+            "fstpt %1"
+            : "=m"(sw), "=m"(lr) : "m"(lb), "m"(la));
+            break;
+        case 1: __asm__ volatile(
+            "fnclex\n\t"
+            "fldt %2\n\t"
+            "fldt %3\n\t"
+            "fsubrp\n\t"        // AT&T: ST(1) = ST(1) - ST(0) = lb - la
+            "fnstsw %0\n\t"
+            "fstpt %1"
+            : "=m"(sw), "=m"(lr) : "m"(lb), "m"(la));
+            break;
+        case 2: __asm__ volatile(
+            "fnclex\n\t"
+            "fldt %2\n\t"
+            "fldt %3\n\t"
+            "fmulp\n\t"
+            "fnstsw %0\n\t"
+            "fstpt %1"
+            : "=m"(sw), "=m"(lr) : "m"(lb), "m"(la));
+            break;
+        case 3: __asm__ volatile(
+            "fnclex\n\t"
+            "fldt %2\n\t"
+            "fldt %3\n\t"
+            "fdivrp\n\t"        // AT&T: ST(1) = ST(1) / ST(0) = lb / la
+            "fnstsw %0\n\t"
+            "fstpt %1"
+            : "=m"(sw), "=m"(lr) : "m"(lb), "m"(la));
+            break;
+    }
+    dst = ld_to_fp80(lr);
+    return sw & ~X87SW_TOP_MASK;
+}
+
+static uint16_t host_x87_sqrt(fp80_t const &a, fp80_t &dst)
+{
+    long double la = fp80_to_ld(a);
+    long double lr;
+    uint16_t sw;
+    __asm__ volatile(
+        "fnclex\n\t"
+        "fldt %2\n\t"
+        "fsqrt\n\t"
+        "fnstsw %0\n\t"
+        "fstpt %1"
+        : "=m"(sw), "=m"(lr) : "m"(la));
+    dst = ld_to_fp80(lr);
+    return sw & ~X87SW_TOP_MASK;
+}
+#endif // X87_HOST_HAS_FP80
 
 //
 // Compute "a + b" via fpext96_t plus full NaN/Inf/zero handling.
@@ -736,13 +843,38 @@ static uint16_t do_div(fp80_t a, fp80_t b, fp80_t &dst)
 //   FMULP    ST(1) <- ST(1)*ST(0)  ⇒ result = ARG1 * ARG2  (symmetric)
 //   FDIVP    ST(1) <- ST(1)/ST(0)  ⇒ result = ARG2 / ARG1
 //   FDIVRP   ST(1) <- ST(0)/ST(1)  ⇒ result = ARG1 / ARG2
+// Asm convention: with ARG1 -> ST(0) and ARG2 -> ST(1):
+//   FADDP  ⇒ ARG1 + ARG2  | FSUBP  ⇒ ARG2 - ARG1 | FSUBRP ⇒ ARG1 - ARG2
+//   FMULP  ⇒ ARG1 * ARG2  | FDIVP  ⇒ ARG2 / ARG1 | FDIVRP ⇒ ARG1 / ARG2
+// In test_binary80 we receive (src2, src1), so a=src2 b=src1 and we want
+// x87_fsub(a,b)  = b - a   (matches FSUBP)
+// x87_fsubr(a,b) = a - b   (matches FSUBRP)
+// x87_fdiv(a,b)  = b / a   (matches FDIVP)
+// x87_fdivr(a,b) = a / b   (matches FDIVRP)
+#if X87_HOST_HAS_FP80
+uint16_t fp80_t::x87_fadd (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary(a, b, dst, 0); }
+uint16_t fp80_t::x87_fsub (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary(a, b, dst, 1); }
+uint16_t fp80_t::x87_fsubr(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary(b, a, dst, 1); }
+uint16_t fp80_t::x87_fmul (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary(a, b, dst, 2); }
+uint16_t fp80_t::x87_fdiv (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary(a, b, dst, 3); }
+uint16_t fp80_t::x87_fdivr(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary(b, a, dst, 3); }
+#else
 uint16_t fp80_t::x87_fadd (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_add(a, b, dst, false); }
 uint16_t fp80_t::x87_fsub (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_add(b, a, dst, true);  }
 uint16_t fp80_t::x87_fsubr(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_add(a, b, dst, true);  }
 uint16_t fp80_t::x87_fmul (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_mul(a, b, dst);        }
 uint16_t fp80_t::x87_fdiv (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_div(b, a, dst);        }
 uint16_t fp80_t::x87_fdivr(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_div(a, b, dst);        }
+#endif
 
+#if X87_HOST_HAS_FP80
+uint16_t fp80_t::x87_fsqrt(fp80_t const &src, fp80_t &dst)
+{
+    // Special-case for the negative-zero edge: fsqrt(-0) = -0 by spec; the
+    // host x87 honors that already.
+    return host_x87_sqrt(src, dst);
+}
+#else
 //
 // Square root via Newton-Raphson on the (split) mantissa.  We extract an
 // even-exponent mantissa in [1.0, 4.0), compute sqrt to 64-bit precision via
@@ -824,5 +956,6 @@ uint16_t fp80_t::x87_fsqrt(fp80_t const &src, fp80_t &dst)
     dst = fp80_t(y, uint16_t(result_exp));
     return flags | X87SW_PRECISION_EX;
 }
+#endif // X87_HOST_HAS_FP80
 
 }

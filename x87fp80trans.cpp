@@ -432,10 +432,13 @@ static fp80_t int32_to_fp80(int32_t v)
 }
 
 //
-// FXTRACT (Intel SDM): split operand into integer-log2 and significand.
-//   dst1 = unbiased exponent as an integer fp80
-//   dst2 = significand normalized to [1.0, 2.0) with src's sign
-// Zero → dst1 = -inf, dst2 = src, sets #Z.
+// FXTRACT (Intel SDM): split operand into significand and integer-log2.
+// Matches the fp64_t::x87_fxtract convention (dst1 = significand, dst2 =
+// exponent) which is the asm ordering after FXTRACT + the two FSTPs.
+//   dst1 = significand normalized to [1.0, 2.0) with src's sign
+//   dst2 = unbiased exponent as an integer fp80
+// Zero → dst1 = src, dst2 = -inf, sets #Z.
+// Infinity → dst1 = src, dst2 = +inf.
 //
 uint16_t fp80_t::x87_fxtract(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
 {
@@ -447,14 +450,14 @@ uint16_t fp80_t::x87_fxtract(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
     }
     if (src.iszero())
     {
-        dst1 = fp80_t::const_ninf();
-        dst2 = src;
+        dst1 = src;
+        dst2 = fp80_t::const_ninf();
         return X87SW_DIVZERO_EX;
     }
     if (src.isinf())
     {
-        dst1 = fp80_t::const_pinf();
-        dst2 = src;
+        dst1 = src;
+        dst2 = fp80_t::const_pinf();
         return 0;
     }
 
@@ -471,10 +474,10 @@ uint16_t fp80_t::x87_fxtract(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
         flags = X87SW_DENORM_EX;
     }
 
-    // dst2 = the same mantissa with exponent biased to 0 (i.e., [1.0, 2.0))
-    dst2 = fp80_t(mant, sign | uint16_t(FP80_EXPONENT_BIAS));
-    // dst1 = exp as fp80 integer
-    dst1 = int32_to_fp80(int32_t(exp));
+    // dst1 = the same mantissa with exponent biased to 0 (i.e., [1.0, 2.0))
+    dst1 = fp80_t(mant, sign | uint16_t(FP80_EXPONENT_BIAS));
+    // dst2 = exp as fp80 integer
+    dst2 = int32_to_fp80(int32_t(exp));
     return flags;
 }
 
@@ -577,8 +580,15 @@ uint16_t fp80_t::x87_frndint(fp80_t const &src, fp80_t &dst)
         else if (rmode == X87CW_ROUNDING_NEAREST) to_one = false;  // |x| < 0.5
         else if (rmode == X87CW_ROUNDING_DOWN)    to_one = is_neg;
         else                                      to_one = !is_neg;  // UP
-        if (to_one) dst = fp80_t(FP80_EXPLICIT_ONE, sign | uint16_t(FP80_EXPONENT_BIAS));
-        else        dst = is_neg ? fp80_t::const_nzero() : fp80_t::const_zero();
+        if (to_one)
+        {
+            dst = fp80_t(FP80_EXPLICIT_ONE, sign | uint16_t(FP80_EXPONENT_BIAS));
+            flags |= X87SW_C1;     // magnitude rounded up from tiny to 1
+        }
+        else
+        {
+            dst = is_neg ? fp80_t::const_nzero() : fp80_t::const_zero();
+        }
         return flags;
     }
 
@@ -606,8 +616,15 @@ uint16_t fp80_t::x87_frndint(fp80_t const &src, fp80_t &dst)
         else if (rmode == X87CW_ROUNDING_DOWN) to_one = is_neg;
         else                                   to_one = !is_neg;  // UP
 
-        if (to_one) dst = fp80_t(FP80_EXPLICIT_ONE, sign | uint16_t(FP80_EXPONENT_BIAS));
-        else        dst = is_neg ? fp80_t::const_nzero() : fp80_t::const_zero();
+        if (to_one)
+        {
+            dst = fp80_t(FP80_EXPLICIT_ONE, sign | uint16_t(FP80_EXPONENT_BIAS));
+            flags |= X87SW_C1;     // magnitude rounded up
+        }
+        else
+        {
+            dst = is_neg ? fp80_t::const_nzero() : fp80_t::const_zero();
+        }
         return flags;
     }
 
@@ -736,14 +753,15 @@ uint16_t fp80_t::x87_ftst(fp80_t const &src)
 
 //
 // FCOM: compare two operands.  Sets #IA on any NaN (signaling or quiet);
-// sets #D if either operand is denormal.
+// sets #D if either operand is denormal *and* neither is NaN (the FPU does
+// not raise DE alongside an unordered result).
 //
 uint16_t fp80_t::x87_fcom(fp80_t const &a, fp80_t const &b)
 {
+    int c = compare_fp80_3way_trans(a, b);
+    if (c == 2) return X87SW_C3 | X87SW_C2 | X87SW_C0 | X87SW_INVALID_EX;
     uint16_t flags = 0;
     if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
-    int c = compare_fp80_3way_trans(a, b);
-    if (c == 2) return flags | X87SW_C3 | X87SW_C2 | X87SW_C0 | X87SW_INVALID_EX;
     if (c == 0) return flags | X87SW_C3;
     if (c <  0) return flags | X87SW_C0;
     return flags;
@@ -754,15 +772,15 @@ uint16_t fp80_t::x87_fcom(fp80_t const &a, fp80_t const &b)
 //
 uint16_t fp80_t::x87_fucom(fp80_t const &a, fp80_t const &b)
 {
-    uint16_t flags = 0;
-    if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
     int c = compare_fp80_3way_trans(a, b);
     if (c == 2)
     {
-        uint16_t sw = flags | X87SW_C3 | X87SW_C2 | X87SW_C0;
+        uint16_t sw = X87SW_C3 | X87SW_C2 | X87SW_C0;
         if (a.issnan() || b.issnan()) sw |= X87SW_INVALID_EX;
         return sw;
     }
+    uint16_t flags = 0;
+    if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
     if (c == 0) return flags | X87SW_C3;
     if (c <  0) return flags | X87SW_C0;
     return flags;

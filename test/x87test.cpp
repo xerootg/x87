@@ -1204,10 +1204,20 @@ inline uint16_t fp80_chs_wrap(fp80_t const &a, fp80_t &dst) { dst = fp80_t::chs(
 //
 // floor() and ceil() are defined as round-to-int with rounding mode Down
 // and Up respectively. The asm side uses frndint with an appropriately
-// preconfigured control word.
+// preconfigured control word. The wrappers below preconfigure the host's
+// rounding mode (so fp80_t's internal fpround_t::get sees it) and forward
+// to x87_frndint, which lets us compare full SW against the FPU's frndint.
 //
-inline uint16_t fp80_floor_wrap(fp80_t const &a, fp80_t &dst) { dst = fp80_t::floor(a); return 0; }
-inline uint16_t fp80_ceil_wrap (fp80_t const &a, fp80_t &dst) { dst = fp80_t::ceil(a);  return 0; }
+inline uint16_t fp80_floor_wrap(fp80_t const &a, fp80_t &dst)
+{
+    fpround_t r(X87CW_ROUNDING_DOWN);
+    return fp80_t::x87_frndint(a, dst);
+}
+inline uint16_t fp80_ceil_wrap(fp80_t const &a, fp80_t &dst)
+{
+    fpround_t r(X87CW_ROUNDING_UP);
+    return fp80_t::x87_frndint(a, dst);
+}
 
 void test_copysign80()
 {
