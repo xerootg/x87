@@ -875,7 +875,171 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     return flags;
 }
 
-uint16_t fp80_t::x87_fyl2x  (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fyl2x);   }
+//
+// fyl2x: compute src2 * log2(src1).  fdlibm-derived algorithm: reduce
+// src1 to mantissa m and integer exponent k where m ∈ [1, 2), then
+// log2(src1) = k + log2(m). log2(m) is computed via the standard
+// (s = (m-1)/(m+1)) polynomial expansion in fpext96_t precision.
+//
+uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
+{
+    using fpext_t = fpext96_t;
+
+    uint16_t flags = 0;
+    if (src1.isdenorm() || src2.isdenorm()) flags |= X87SW_DENORM_EX;
+
+    // Special cases per Intel SDM §8.3.9 / FYL2X.
+    if (src1.isnan() || src2.isnan())
+    {
+        bool snan = src1.issnan() || src2.issnan();
+        if (src1.isnan()) dst = src1.issnan() ? fp80_t::make_qnan(src1) : src1;
+        else              dst = src2.issnan() ? fp80_t::make_qnan(src2) : src2;
+        return snan ? X87SW_INVALID_EX : 0;
+    }
+    if (src1.sign())
+    {
+        // log of a negative number is undefined.
+        dst = fp80_t::const_indef();
+        return X87SW_INVALID_EX;
+    }
+    if (src1.ismaxexp())   // +inf
+    {
+        // log2(+inf) = +inf, multiplied by src2 — gives signed inf, except
+        // src2 = 0 → indef.
+        if (src2.iszero())
+        {
+            dst = fp80_t::const_indef();
+            return X87SW_INVALID_EX;
+        }
+        dst = src2.sign() ? fp80_t::const_ninf() : fp80_t::const_pinf();
+        return flags;
+    }
+    if (src1.iszero())
+    {
+        // log2(0) = -inf, multiplied by src2.
+        if (src2.iszero())
+        {
+            dst = fp80_t::const_indef();
+            return X87SW_INVALID_EX;
+        }
+        if (src2.ismaxexp())   // 0 * inf
+        {
+            dst = fp80_t::const_indef();
+            return X87SW_INVALID_EX;
+        }
+        // -inf * src2 → signed inf, divzero flag
+        dst = (src2.sign() == 0) ? fp80_t::const_ninf() : fp80_t::const_pinf();
+        return flags | X87SW_DIVZERO_EX;
+    }
+    if (src2.ismaxexp())
+    {
+        // src2 = ±inf, src1 finite >0. If src1 == 1, log2(1) = 0, 0*inf = indef.
+        // Otherwise log2(src1) * ±inf = ±inf with sign depending.
+        // Compare src1 to 1.
+        if (src1.sign_exp() == 0x3FFF && src1.mantissa() == FP80_EXPLICIT_ONE)
+        {
+            dst = fp80_t::const_indef();
+            return X87SW_INVALID_EX;
+        }
+        // src1 != 1; log2(src1) is positive if src1>1, negative if src1<1.
+        bool src1_gt_1 = (src1.sign_exp() > 0x3FFF) ||
+                         (src1.sign_exp() == 0x3FFF && src1.mantissa() > FP80_EXPLICIT_ONE);
+        bool result_sign = src2.sign() ^ (!src1_gt_1);
+        dst = result_sign ? fp80_t::const_ninf() : fp80_t::const_pinf();
+        return flags;
+    }
+    if (src2.iszero())
+    {
+        // src2 = 0, src1 finite >0. log2(src1) is finite (or -inf if src1=0 but
+        // we already handled that). 0 * finite = 0, with sign from log2(src1).
+        // log2(1) = 0 too. So result is signed zero based on quadrant.
+        bool src1_gt_1 = (src1.sign_exp() > 0x3FFF) ||
+                         (src1.sign_exp() == 0x3FFF && src1.mantissa() > FP80_EXPLICIT_ONE);
+        bool log_neg = !src1_gt_1;
+        bool result_neg = log_neg ^ (src2.sign() != 0);
+        dst = result_neg ? fp80_t::const_nzero() : fp80_t::const_zero();
+        return flags;
+    }
+
+    // Main path: src1 ∈ (0, ∞), src1 != 1, src2 finite non-zero.
+    // log2(src1) = exponent_of(src1) + log2(mantissa_of(src1)) where mantissa ∈ [1, 2).
+    //
+    // For log2(m) where m ∈ [1, 2):
+    //   m - 1 close to 0 → use series expansion
+    //   General: log(m) = 2 atanh((m-1)/(m+1)) — fdlibm style.
+    //
+    // We compute log_e via the (m-1)/(m+1) substitution, then multiply by 1/ln(2).
+
+    fpext_t one(0x8000000000000000ull, 0x00000000, 0, 0);
+
+    // Extract exponent k and mantissa m = src1 / 2^k where m ∈ [1, 2).
+    int k = (src1.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+    uint64_t mant_bits = src1.mantissa();
+    if (src1.isdenorm())
+    {
+        int s = count_leading_zeros64(mant_bits);
+        mant_bits <<= s;
+        k = 1 - FP80_EXPONENT_BIAS - s;
+    }
+    // m = mantissa with biased exponent 0x3FFF → in [1, 2).
+    fp80_t m_fp80(mant_bits, uint16_t(FP80_EXPONENT_BIAS));
+    fpext_t m(m_fp80);
+
+    // s = (m - 1) / (m + 1)
+    fpext_t numer; numer.sub(m, one);
+    fpext_t denom; denom.add(m, one);
+    fpext_t s = numer.div64(denom);
+    fpext_t s2 = s * s;
+
+    // log(m) = 2*s * (1 + s^2/3 + s^4/5 + s^6/7 + ...)
+    // Polynomial in s2 of the series.
+    static fpext_t const c1_3(0xaaaaaaaaaaaaaaaaull, 0xaaaaaaab, -2, 0);  // 1/3
+    static fpext_t const c1_5(0xccccccccccccccccull, 0xcccccccd, -3, 0);  // 1/5
+    static fpext_t const c1_7(0x9249249249249249ull, 0x24924925, -3, 0);  // 1/7
+    static fpext_t const c1_9(0xe38e38e38e38e38eull, 0x38e38e39, -4, 0);  // 1/9
+    static fpext_t const c1_11(0xba2e8ba2e8ba2e8bull, 0xa2e8ba2f, -4, 0); // 1/11
+    static fpext_t const c1_13(0x9d89d89d89d89d89ull, 0xd89d89d9, -4, 0); // 1/13
+
+    // Horner: ((((c1_13 * s2 + c1_11) * s2 + c1_9) * s2 + c1_7) * s2 + c1_5) * s2 + c1_3) * s2 + 1
+    fpext_t poly = c1_13 * s2 + c1_11;
+    poly = poly * s2 + c1_9;
+    poly = poly * s2 + c1_7;
+    poly = poly * s2 + c1_5;
+    poly = poly * s2 + c1_3;
+    poly = poly * s2 + one;
+
+    fpext_t two(0x8000000000000000ull, 0x00000000, 1, 0);
+    fpext_t logm = two * s * poly;     // log(m) (natural log)
+
+    // log2(m) = log(m) / log(2)
+    static fpext_t const ln2(0xb17217f7d1cf79abull, 0xc9e3b398, -1, 0);     // ln(2)
+    fpext_t log2_m = logm.div64(ln2);
+
+    // log2(src1) = k + log2(m)
+    fpext_t k_ext;
+    {
+        // Build fpext from integer k.
+        if (k == 0)        k_ext = fpext_t::zero;
+        else
+        {
+            bool neg = k < 0;
+            uint64_t a = neg ? -(uint64_t)k : (uint64_t)k;
+            int sh = count_leading_zeros64(a);
+            k_ext = fpext_t(a << sh, 0, 63 - sh, neg ? 1 : 0);
+        }
+    }
+    fpext_t log2_x;
+    log2_x.add(k_ext, log2_m);
+
+    // result = src2 * log2(src1)
+    fpext_t s2_ext(src2);
+    fpext_t result = log2_x * s2_ext;
+
+    flags |= X87SW_PRECISION_EX;
+    dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
+    return flags;
+}
+
 uint16_t fp80_t::x87_fyl2xp1(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fyl2xp1); }
 uint16_t fp80_t::x87_fsin   (fp80_t const &a, fp80_t &dst)                  { return via_fp64_unary(a, dst, &fp64_t::x87_fsin); }
 uint16_t fp80_t::x87_fcos   (fp80_t const &a, fp80_t &dst)                  { return via_fp64_unary(a, dst, &fp64_t::x87_fcos); }
