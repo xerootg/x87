@@ -570,8 +570,26 @@ uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
 uint16_t fp80_t::x87_fprem (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary_trans(a, b, dst, 3); }
 uint16_t fp80_t::x87_fprem1(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary_trans(a, b, dst, 4); }
 #else
-uint16_t fp80_t::x87_fprem(fp80_t const &, fp80_t const &, fp80_t &dst)               { return stub_unary(dst); }
-uint16_t fp80_t::x87_fprem1(fp80_t const &, fp80_t const &, fp80_t &dst)              { return stub_unary(dst); }
+//
+// Hand-rolled fallback path (aarch64 + everywhere not x86).
+//
+// For ops that have working fp64 implementations in x87fp64trans.cpp, we
+// route through them: convert fp80 -> fp64 -> compute -> fp64 -> fp80.
+// This loses ~11 bits of precision vs. a true fp80 implementation but is
+// functional and matches the spec's semantics. A future enhancement is to
+// re-port each fp64 algorithm to fpext96_t for full extended precision.
+//
+static uint16_t via_fp64_binary(fp80_t const &a, fp80_t const &b, fp80_t &dst,
+                                 uint16_t (*fn)(fp64_t const &, fp64_t const &, fp64_t &))
+{
+    fp64_t a64(a), b64(b), r64;
+    uint16_t sw = fn(a64, b64, r64);
+    dst = fp80_t(r64);
+    return sw;
+}
+
+uint16_t fp80_t::x87_fprem (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fprem);  }
+uint16_t fp80_t::x87_fprem1(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fprem1); }
 #endif
 #if X87_HOST_HAS_FP80
 uint16_t fp80_t::x87_fyl2x  (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary_trans(a, b, dst, 0); }
@@ -582,13 +600,34 @@ uint16_t fp80_t::x87_fcos   (fp80_t const &a, fp80_t &dst)                  { re
 uint16_t fp80_t::x87_fsincos(fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return host_x87_unary2(a, d1, d2, 0); }
 uint16_t fp80_t::x87_fptan  (fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return host_x87_unary2(a, d1, d2, 1); }
 #else
-uint16_t fp80_t::x87_fyl2x(fp80_t const &, fp80_t const &, fp80_t &dst)               { return stub_unary(dst); }
-uint16_t fp80_t::x87_fyl2xp1(fp80_t const &, fp80_t const &, fp80_t &dst)             { return stub_unary(dst); }
-uint16_t fp80_t::x87_fsin(fp80_t const &, fp80_t &dst)                                { return stub_unary(dst); }
-uint16_t fp80_t::x87_fcos(fp80_t const &, fp80_t &dst)                                { return stub_unary(dst); }
-uint16_t fp80_t::x87_fsincos(fp80_t const &, fp80_t &dst1, fp80_t &dst2)              { return stub_unary2(dst1, dst2); }
-uint16_t fp80_t::x87_fptan(fp80_t const &, fp80_t &dst1, fp80_t &dst2)                { return stub_unary2(dst1, dst2); }
-uint16_t fp80_t::x87_fpatan(fp80_t const &, fp80_t const &, fp80_t &dst)              { return stub_unary(dst); }
+// Hand-rolled fallback: route through the fp64 implementations
+// (Cephes/fdlibm) and accept the ~11-bit precision loss.
+static uint16_t via_fp64_unary(fp80_t const &a, fp80_t &dst,
+                               uint16_t (*fn)(fp64_t const &, fp64_t &))
+{
+    fp64_t a64(a), r64;
+    uint16_t sw = fn(a64, r64);
+    dst = fp80_t(r64);
+    return sw;
+}
+
+static uint16_t via_fp64_unary2(fp80_t const &a, fp80_t &dst1, fp80_t &dst2,
+                                uint16_t (*fn)(fp64_t const &, fp64_t &, fp64_t &))
+{
+    fp64_t a64(a), r1_64, r2_64;
+    uint16_t sw = fn(a64, r1_64, r2_64);
+    dst1 = fp80_t(r1_64);
+    dst2 = fp80_t(r2_64);
+    return sw;
+}
+
+uint16_t fp80_t::x87_fyl2x  (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fyl2x);   }
+uint16_t fp80_t::x87_fyl2xp1(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fyl2xp1); }
+uint16_t fp80_t::x87_fpatan (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fpatan);  }
+uint16_t fp80_t::x87_fsin   (fp80_t const &a, fp80_t &dst)                  { return via_fp64_unary(a, dst, &fp64_t::x87_fsin); }
+uint16_t fp80_t::x87_fcos   (fp80_t const &a, fp80_t &dst)                  { return via_fp64_unary(a, dst, &fp64_t::x87_fcos); }
+uint16_t fp80_t::x87_fsincos(fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return via_fp64_unary2(a, d1, d2, &fp64_t::x87_fsincos); }
+uint16_t fp80_t::x87_fptan  (fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return via_fp64_unary2(a, d1, d2, &fp64_t::x87_fptan); }
 #endif
 #if X87_HOST_HAS_FP80
 uint16_t fp80_t::x87_frndint(fp80_t const &src, fp80_t &dst)
