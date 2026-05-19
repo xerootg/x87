@@ -907,7 +907,10 @@ static uint16_t host_x87_sqrt(fp80_t const &a, fp80_t &dst)
 #endif // X87_HOST_HAS_FP80
 
 //
-// Compute "a + b" via fpext96_t plus full NaN/Inf/zero handling.
+// Hand-rolled fp80 add/sub with full 128-bit working precision.
+// Aligns mantissas in a __uint128_t with proper sticky-bit tracking,
+// then rounds via round_fpext96_to_fp80.
+//
 // 'subtract' inverts b's sign before adding.
 //
 static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
@@ -950,19 +953,107 @@ static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
     uint16_t flags = 0;
     if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
 
-    fpext96_t ea(a), eb(b);
-    // If the exponent difference exceeds fpext96_t's mantissa+extension
-    // bits (96), the smaller operand can't influence the result through
-    // fpext96_t's alignment shift — but the operation is still inexact
-    // and the result rounds toward the larger operand. Track PE here
-    // (fpext96_t::add_values loses this information internally).
-    int aexp = ea.exponent(), bexp = eb.exponent();
-    int exp_diff = aexp - bexp;
-    if (exp_diff < 0) exp_diff = -exp_diff;
-    if (exp_diff > 64) flags |= X87SW_PRECISION_EX;
-    fpext96_t result;
-    result.add(ea, eb);
-    dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
+    // Extract sign / biased exponent / mantissa.
+    int sa = a.sign();
+    int sb = b.sign();
+    int ea = a.sign_exp() & FP80_EXPONENT_MASK;
+    int eb = b.sign_exp() & FP80_EXPONENT_MASK;
+    uint64_t ma = a.mantissa();
+    uint64_t mb = b.mantissa();
+
+    // Normalize denormals so MSB of mantissa is set; compute "true" exponent
+    // (unbiased, treating the mantissa as a 64-bit integer with explicit-1 at
+    // bit 63 — same convention as fpext96_t::exponent).
+    int true_ea = (ea == 0) ? (1 - FP80_EXPONENT_BIAS) : (ea - FP80_EXPONENT_BIAS);
+    int true_eb = (eb == 0) ? (1 - FP80_EXPONENT_BIAS) : (eb - FP80_EXPONENT_BIAS);
+    if (ea == 0) { int s = count_leading_zeros64(ma); ma <<= s; true_ea -= s; }
+    if (eb == 0) { int s = count_leading_zeros64(mb); mb <<= s; true_eb -= s; }
+
+    // Place both mantissas in a 128-bit working space with the explicit-1 at
+    // bit 127 — gives 64 bits of round/sticky room.
+    __uint128_t big, small;
+    int result_exp;
+    int sign_of_result;
+    bool big_is_a;
+    if (true_ea > true_eb || (true_ea == true_eb && ma >= mb))
+    {
+        big = (__uint128_t)ma << 64;
+        small = (__uint128_t)mb << 64;
+        result_exp = true_ea;
+        sign_of_result = sa;
+        big_is_a = true;
+        int shift = true_ea - true_eb;
+        if (shift >= 128) { small = 0; if (mb != 0) small = 1; /* sticky */ }
+        else if (shift > 0)
+        {
+            __uint128_t lost = small & (((__uint128_t)1 << shift) - 1);
+            small >>= shift;
+            if (lost != 0) small |= 1;
+        }
+    }
+    else
+    {
+        big = (__uint128_t)mb << 64;
+        small = (__uint128_t)ma << 64;
+        result_exp = true_eb;
+        sign_of_result = sb;
+        big_is_a = false;
+        int shift = true_eb - true_ea;
+        if (shift >= 128) { small = 0; if (ma != 0) small = 1; }
+        else if (shift > 0)
+        {
+            __uint128_t lost = small & (((__uint128_t)1 << shift) - 1);
+            small >>= shift;
+            if (lost != 0) small |= 1;
+        }
+    }
+
+    __uint128_t result;
+    int result_sign_bit;
+    if (sa == sb)
+    {
+        // Same-sign add — carry can occur (result spills into bit 128).
+        result = big + small;
+        result_sign_bit = sign_of_result;
+        if (result < big)
+        {
+            // Carry into bit 128: shift right one and bump exponent.
+            bool low_was_set = (result & 1) != 0;
+            result = (result >> 1) | ((__uint128_t)1 << 127);
+            if (low_was_set) result |= 1;            // preserve sticky
+            result_exp += 1;
+        }
+    }
+    else
+    {
+        // Different signs — subtract. big >= small by construction.
+        result = big - small;
+        result_sign_bit = sign_of_result;
+        if (result == 0)
+        {
+            // Exact cancellation: sign of zero per rounding mode (only the
+            // DOWN mode produces -0 when adding values of opposite sign).
+            x87cw_t r = read_x87_cw() & X87CW_ROUNDING_MASK;
+            dst = (r == X87CW_ROUNDING_DOWN) ? fp80_t::const_nzero() : fp80_t::const_zero();
+            return flags;
+        }
+        // Normalize: shift left until MSB at bit 127.
+        uint64_t hi = uint64_t(result >> 64);
+        uint64_t lo = uint64_t(result);
+        int lz = (hi != 0) ? count_leading_zeros64(hi) : (64 + count_leading_zeros64(lo));
+        result <<= lz;
+        result_exp -= lz;
+    }
+    (void)big_is_a;
+
+    // Pack into fpext96_t (64-bit mantissa + 32-bit extension + sticky)
+    uint64_t res_mant = uint64_t(result >> 64);
+    uint64_t lower64  = uint64_t(result);
+    uint32_t res_ext  = uint32_t(lower64 >> 32);
+    if ((lower64 & 0xFFFFFFFFu) != 0) res_ext |= 1;
+
+    fpext96_t r(res_mant, res_ext, result_exp, result_sign_bit ? 1 : 0);
+    dst = round_fpext96_to_fp80(r, read_x87_cw(), flags);
     return flags;
 }
 
