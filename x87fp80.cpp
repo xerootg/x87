@@ -678,8 +678,12 @@ static fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &ou
         if (to_max_finite)
         {
             uint64_t maxm = ~((1ull << drop_in_mant) - 1);  // largest with PC zeroes
+            // C1 cleared: rounded toward zero (down in magnitude).
+            out_sw &= ~X87SW_C1;
             return fp80_t(maxm, sign_bit | uint16_t(FP80_EXPONENT_MAX_BIASED - 1));
         }
+        // Rounded up to infinity — set C1.
+        out_sw |= X87SW_C1;
         return fp80_t(FP80_EXPLICIT_ONE, sign_bit | FP80_EXPONENT_MAX_BIASED);
     }
     if (biased <= 0)
@@ -915,8 +919,7 @@ static uint16_t host_x87_sqrt(fp80_t const &a, fp80_t &dst)
 //
 static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
 {
-    if (subtract) b = fp80_t::chs(b);
-
+    // NaN check before sign flip — subtract shouldn't change a NaN's sign.
     if (a.isnan() || b.isnan())
     {
         bool snan = a.issnan() || b.issnan();
@@ -924,6 +927,7 @@ static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
         else           dst = b.issnan() ? fp80_t::make_qnan(b) : b;
         return snan ? X87SW_INVALID_EX : 0;
     }
+    if (subtract) b = fp80_t::chs(b);
     if (a.isinf() && b.isinf())
     {
         if (a.sign() != b.sign())
@@ -934,8 +938,8 @@ static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
         dst = a;
         return 0;
     }
-    if (a.isinf()) { dst = a; return 0; }
-    if (b.isinf()) { dst = b; return 0; }
+    if (a.isinf()) { dst = a; return b.isdenorm() ? X87SW_DENORM_EX : 0; }
+    if (b.isinf()) { dst = b; return a.isdenorm() ? X87SW_DENORM_EX : 0; }
     if (a.iszero() && b.iszero())
     {
         if (a.sign() == b.sign())
@@ -1077,15 +1081,61 @@ static uint16_t do_mul(fp80_t a, fp80_t b, fp80_t &dst)
         return X87SW_INVALID_EX;
     }
     uint16_t result_sign = (a.sign() ^ b.sign()) ? FP80_SIGN_MASK : 0;
-    if (a_inf || b_inf) { dst = fp80_t(FP80_EXPLICIT_ONE, result_sign | FP80_EXPONENT_MAX_BIASED); return 0; }
-    if (a_zero || b_zero) { dst = fp80_t(0, result_sign); return 0; }
+    if (a_inf || b_inf) { dst = fp80_t(FP80_EXPLICIT_ONE, result_sign | FP80_EXPONENT_MAX_BIASED); return (a.isdenorm() || b.isdenorm()) ? X87SW_DENORM_EX : 0; }
+    if (a_zero || b_zero) { dst = fp80_t(0, result_sign); return (a.isdenorm() || b.isdenorm()) ? X87SW_DENORM_EX : 0; }
 
     uint16_t flags = 0;
     if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
 
-    fpext96_t ea(a), eb(b), result;
-    result.mul(ea, eb);
-    dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
+    // Hand-rolled multiply: __uint128 product, normalize, round.
+    int ea_b = a.sign_exp() & FP80_EXPONENT_MASK;
+    int eb_b = b.sign_exp() & FP80_EXPONENT_MASK;
+    uint64_t ma = a.mantissa();
+    uint64_t mb = b.mantissa();
+    int true_ea = (ea_b == 0) ? (1 - FP80_EXPONENT_BIAS) : (ea_b - FP80_EXPONENT_BIAS);
+    int true_eb = (eb_b == 0) ? (1 - FP80_EXPONENT_BIAS) : (eb_b - FP80_EXPONENT_BIAS);
+    if (ea_b == 0) { int s = count_leading_zeros64(ma); ma <<= s; true_ea -= s; }
+    if (eb_b == 0) { int s = count_leading_zeros64(mb); mb <<= s; true_eb -= s; }
+
+    __uint128_t prod = (__uint128_t)ma * (__uint128_t)mb;
+    // Both have MSB at bit 63, so prod has MSB at bit 126 or 127.
+    int result_exp = true_ea + true_eb;
+    if ((prod & ((__uint128_t)1 << 127)) == 0)
+    {
+        // MSB at 126: shift left 1 to put it at 127.
+        prod <<= 1;
+        result_exp -= 1;
+    }
+    // The MSB-at-127 product represents a value of (mant_a × mant_b) × 2^(true_ea + true_eb - 63).
+    // After shifting, the effective representation has the explicit-1 at bit 127, so the
+    // exponent corresponds to bit 63 being the "ones" position of the mantissa.
+    // Wait — fpext96_t convention: mantissa MSB at bit 63 with exponent meaning "exp - 63".
+    // Here our 128-bit prod has MSB at bit 127, so we'd treat it as a 128-bit mantissa with
+    // exponent +1 relative to the fpext96_t convention if we naively reused exp. Let me
+    // think:
+    //   value_a = ma * 2^(true_ea - 63)
+    //   value_b = mb * 2^(true_eb - 63)
+    //   value_a * value_b = (ma * mb) * 2^(true_ea + true_eb - 126)
+    //   = prod * 2^(true_ea + true_eb - 126)
+    // We've shifted prod left 1 (if needed) so MSB is at bit 127:
+    //   = (prod_shifted) * 2^(true_ea + true_eb - 126 - shift)
+    // To represent prod_shifted as fpext96_t (MSB at bit 63 of 96), shift right 64:
+    //   = (prod_shifted >> 64) * 2^(true_ea + true_eb - 126 - shift + 64)
+    //   = mant64 * 2^(result_exp_for_fpext96 - 63) where
+    //   result_exp_for_fpext96 = true_ea + true_eb - 126 - shift + 64 + 63
+    //                          = true_ea + true_eb + 1 - shift
+    // (when shift=0, +1; when shift=-1, +2. We tracked shift implicitly via -1 to result_exp.)
+    // So actually result_exp in our convention should be true_ea + true_eb + 1 after shift.
+    // Adjust:
+    result_exp += 1;
+
+    uint64_t res_mant = uint64_t(prod >> 64);
+    uint64_t lower64  = uint64_t(prod);
+    uint32_t res_ext  = uint32_t(lower64 >> 32);
+    if ((lower64 & 0xFFFFFFFFu) != 0) res_ext |= 1;   // sticky
+
+    fpext96_t r(res_mant, res_ext, result_exp, (result_sign != 0) ? 1 : 0);
+    dst = round_fpext96_to_fp80(r, read_x87_cw(), flags);
     return flags;
 }
 
@@ -1117,9 +1167,10 @@ static uint16_t do_div(fp80_t a, fp80_t b, fp80_t &dst)
         dst = fp80_t(FP80_EXPLICIT_ONE, result_sign | FP80_EXPONENT_MAX_BIASED);
         return X87SW_DIVZERO_EX;
     }
-    if (a_inf)  { dst = fp80_t(FP80_EXPLICIT_ONE, result_sign | FP80_EXPONENT_MAX_BIASED); return 0; }
-    if (b_inf)  { dst = fp80_t(0, result_sign); return 0; }
-    if (a_zero) { dst = fp80_t(0, result_sign); return 0; }
+    uint16_t spec_flags = (a.isdenorm() || b.isdenorm()) ? X87SW_DENORM_EX : 0;
+    if (a_inf)  { dst = fp80_t(FP80_EXPLICIT_ONE, result_sign | FP80_EXPONENT_MAX_BIASED); return spec_flags; }
+    if (b_inf)  { dst = fp80_t(0, result_sign); return spec_flags; }
+    if (a_zero) { dst = fp80_t(0, result_sign); return spec_flags; }
 
     uint16_t flags = 0;
     if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
@@ -1204,9 +1255,9 @@ uint16_t fp80_t::x87_fsqrt(fp80_t const &src, fp80_t &dst)
 }
 #else
 //
-// Square root via Newton-Raphson on the (split) mantissa.  We extract an
-// even-exponent mantissa in [1.0, 4.0), compute sqrt to 64-bit precision via
-// integer NR, then reassemble with exp/2.  Avoids the fp64 conversion path.
+// Square root via shift-and-subtract on a 128-bit fixed-point input,
+// producing a 64-bit result + remainder. Handed to round_fpext96_to_fp80
+// for proper x87-style rounding.
 //
 uint16_t fp80_t::x87_fsqrt(fp80_t const &src, fp80_t &dst)
 {
@@ -1233,56 +1284,68 @@ uint16_t fp80_t::x87_fsqrt(fp80_t const &src, fp80_t &dst)
         mant <<= s;
         exp = 1 - FP80_EXPONENT_BIAS - s;
     }
-
-    // For sqrt we want an even exponent so that exp/2 is exact. If exp is
-    // odd, halve mantissa and use exp+1 (now even).
-    if (exp & 1)
+    // Now mant has MSB at bit 63; value = mant * 2^(exp - 63). For the
+    // sqrt result-exponent to be a clean integer we need (exp - 63) even,
+    // i.e. exp odd. If exp is even, shift mant right by 1 (track the lost
+    // bit as inexact) and bump exp.
+    bool extra_inexact = false;
+    if ((exp & 1) == 0)
     {
+        extra_inexact = (mant & 1) != 0;
         mant >>= 1;
-        exp  += 1;
+        exp += 1;
     }
-    int result_exp = exp >> 1;
 
-    // Initial estimate: a single iteration of Newton-Raphson starting from
-    // mant/2 + (3<<61) gets us into the right ballpark.  Then refine
-    // a handful more times to reach 64-bit precision.
+    // Compute sqrt(mant * 2^64) using 128-bit shift-and-subtract.
+    // Input has MSB at bit 127 (if no right-shift) or 126 (if shifted).
+    // Either way, the 64 output bits include the explicit-1 at bit 63
+    // (sqrt of value in [2^126, 2^128) is in [2^63, 2^64)).
+    // Compute sqrt of a 192-bit input via shift-and-subtract, producing a
+    // 96-bit result (64-bit mantissa + 32-bit extension for rounding).
     //
-    // We compute y = sqrt(x) where x = mant/2^63 viewed in [1.0, 4.0).
-    // Using fixed-point representation with mant in [2^63, 2^65) (so the
-    // result fits in [2^31, 2^33) of the same fixed-point), and 128-bit
-    // intermediate division.
-    unsigned __int128 x128 = ((unsigned __int128)mant) << 63;     // x at .126 fixed point
-    uint64_t y = mant;                                            // crude initial estimate
-    for (int i = 0; i < 6; i++)
+    // 192-bit input is mant placed at bits 128..191 (i.e. xhi = mant in
+    // 64 high bits, xlo = 0). We iterate 96 times, each time consuming the
+    // top 2 bits of input.
+    uint64_t   xhi = mant;
+    uint64_t   xlo = 0;
+    __uint128_t remainder = 0;
+    __uint128_t result128 = 0;
+    for (int iter = 0; iter < 96; iter++)
     {
-        if (y == 0) break;
-        unsigned __int128 q = x128 / y;     // ~128-bit / 64-bit
-        uint64_t nq = uint64_t(q);
-        y = (y >> 1) + (nq >> 1) + ((y & nq) & 1);  // (y + x/y) / 2 rounded
+        // Top 2 bits of the 192-bit input.
+        uint64_t top2 = (xhi >> 62) & 3;
+        xhi = (xhi << 2) | (xlo >> 62);
+        xlo <<= 2;
+
+        remainder = (remainder << 2) | top2;
+        __uint128_t test = (result128 << 2) | 1;
+        if (remainder >= test)
+        {
+            remainder -= test;
+            result128 = (result128 << 1) | 1;
+        }
+        else
+        {
+            result128 <<= 1;
+        }
+    }
+    // result128 has 96 bits with MSB at bit 95 (or 94 if mant was right-
+    // shifted to fix even-exp).
+    if ((result128 & ((__uint128_t)1 << 95)) == 0)
+    {
+        result128 <<= 1;
+        exp -= 2;
     }
 
-    // Now y is sqrt(mant) approximately, scaled. Renormalize so the
-    // explicit-1 bit is at position 63.
-    int lz = count_leading_zeros64(y);
-    if (lz > 0)
-    {
-        y <<= lz;
-        result_exp -= lz;
-    }
-    result_exp += FP80_EXPONENT_BIAS;
+    int result_exp = (exp - 1) / 2;
 
-    if (result_exp >= FP80_EXPONENT_MAX_BIASED)
-    {
-        dst = fp80_t::const_pinf();
-        return flags | X87SW_OVERFLOW_EX | X87SW_PRECISION_EX;
-    }
-    if (result_exp <= 0)
-    {
-        dst = fp80_t::const_zero();
-        return flags | X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
-    }
-    dst = fp80_t(y, uint16_t(result_exp));
-    return flags | X87SW_PRECISION_EX;
+    uint64_t res_mant = uint64_t(result128 >> 32);
+    uint32_t res_ext  = uint32_t(result128 & 0xFFFFFFFFu);
+    if (remainder != 0 || extra_inexact) res_ext |= 1;
+
+    fpext96_t r(res_mant, res_ext, result_exp, 0);
+    dst = round_fpext96_to_fp80(r, read_x87_cw(), flags);
+    return flags;
 }
 #endif // X87_HOST_HAS_FP80
 
