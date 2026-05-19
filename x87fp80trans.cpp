@@ -391,10 +391,17 @@ tiny:
     return X87SW_PRECISION_EX;
 }
 
+#if X87_HOST_HAS_FP80
+uint16_t fp80_t::x87_f2xm1(fp80_t const &src, fp80_t &dst)
+{
+    return host_x87_unary(src, dst, 2);
+}
+#else
 uint16_t fp80_t::x87_f2xm1(fp80_t const &src, fp80_t &dst)
 {
     return x87_f2xm1_core<false>(src, dst);
 }
+#endif
 
 
 //===========================================================================
@@ -440,6 +447,19 @@ static fp80_t int32_to_fp80(int32_t v)
 // Zero → dst1 = src, dst2 = -inf, sets #Z.
 // Infinity → dst1 = src, dst2 = +inf.
 //
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#define X87_HOST_HAS_FP80 1
+#else
+#define X87_HOST_HAS_FP80 0
+#endif
+
+#if X87_HOST_HAS_FP80
+// Implemented in x87fp80.cpp.
+extern uint16_t host_x87_unary       (fp80_t const &src, fp80_t &dst,                  int op);
+extern uint16_t host_x87_unary2      (fp80_t const &src, fp80_t &dst1, fp80_t &dst2,   int op);
+extern uint16_t host_x87_binary_trans(fp80_t const &a,   fp80_t const &b, fp80_t &dst, int op);
+#endif
+
 uint16_t fp80_t::x87_fxtract(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
 {
     if (src.isnan())
@@ -481,6 +501,12 @@ uint16_t fp80_t::x87_fxtract(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
     return flags;
 }
 
+#if X87_HOST_HAS_FP80
+uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
+{
+    return host_x87_binary_trans(a, b, dst, 5);
+}
+#else
 //
 // FSCALE: dst = a * 2^trunc(b).  Following the asm convention where ARG1
 // becomes ST(0) (the value) and ARG2 becomes ST(1) (the scale factor):
@@ -536,9 +562,24 @@ uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
     dst = fp80_t(a.mantissa(), sign | uint16_t(new_exp));
     return 0;
 }
+#endif // X87_HOST_HAS_FP80
 
+#if X87_HOST_HAS_FP80
+uint16_t fp80_t::x87_fprem (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary_trans(a, b, dst, 3); }
+uint16_t fp80_t::x87_fprem1(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary_trans(a, b, dst, 4); }
+#else
 uint16_t fp80_t::x87_fprem(fp80_t const &, fp80_t const &, fp80_t &dst)               { return stub_unary(dst); }
 uint16_t fp80_t::x87_fprem1(fp80_t const &, fp80_t const &, fp80_t &dst)              { return stub_unary(dst); }
+#endif
+#if X87_HOST_HAS_FP80
+uint16_t fp80_t::x87_fyl2x  (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary_trans(a, b, dst, 0); }
+uint16_t fp80_t::x87_fyl2xp1(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary_trans(a, b, dst, 1); }
+uint16_t fp80_t::x87_fpatan (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary_trans(a, b, dst, 2); }
+uint16_t fp80_t::x87_fsin   (fp80_t const &a, fp80_t &dst)                  { return host_x87_unary(a, dst, 0); }
+uint16_t fp80_t::x87_fcos   (fp80_t const &a, fp80_t &dst)                  { return host_x87_unary(a, dst, 1); }
+uint16_t fp80_t::x87_fsincos(fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return host_x87_unary2(a, d1, d2, 0); }
+uint16_t fp80_t::x87_fptan  (fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return host_x87_unary2(a, d1, d2, 1); }
+#else
 uint16_t fp80_t::x87_fyl2x(fp80_t const &, fp80_t const &, fp80_t &dst)               { return stub_unary(dst); }
 uint16_t fp80_t::x87_fyl2xp1(fp80_t const &, fp80_t const &, fp80_t &dst)             { return stub_unary(dst); }
 uint16_t fp80_t::x87_fsin(fp80_t const &, fp80_t &dst)                                { return stub_unary(dst); }
@@ -546,6 +587,13 @@ uint16_t fp80_t::x87_fcos(fp80_t const &, fp80_t &dst)                          
 uint16_t fp80_t::x87_fsincos(fp80_t const &, fp80_t &dst1, fp80_t &dst2)              { return stub_unary2(dst1, dst2); }
 uint16_t fp80_t::x87_fptan(fp80_t const &, fp80_t &dst1, fp80_t &dst2)                { return stub_unary2(dst1, dst2); }
 uint16_t fp80_t::x87_fpatan(fp80_t const &, fp80_t const &, fp80_t &dst)              { return stub_unary(dst); }
+#endif
+#if X87_HOST_HAS_FP80
+uint16_t fp80_t::x87_frndint(fp80_t const &src, fp80_t &dst)
+{
+    return host_x87_unary(src, dst, 3);
+}
+#else
 //
 // FRNDINT: round ST(0) to the nearest integer per current rounding mode.
 // Per spec: PE flag set if result differs from source; sign-preserving for
@@ -669,6 +717,7 @@ uint16_t fp80_t::x87_frndint(fp80_t const &src, fp80_t &dst)
     dst = fp80_t(result_mant, sign | uint16_t(result_exp));
     return flags;
 }
+#endif // X87_HOST_HAS_FP80
 
 //
 // 3-way magnitude/sign compare reused by all FCOM-family ops.

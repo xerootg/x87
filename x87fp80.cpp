@@ -650,6 +650,100 @@ static uint16_t host_x87_binary(fp80_t const &a, fp80_t const &b, fp80_t &dst, i
     return sw & ~X87SW_TOP_MASK;
 }
 
+// Single-operand FPU op with one fp80 result and SW.
+// op codes:
+//   0: fsin     (sin(ST(0)) -> ST(0))
+//   1: fcos     (cos(ST(0)) -> ST(0))
+//   2: f2xm1    (2^ST(0) - 1 -> ST(0))
+//   3: frndint  (round per CW -> ST(0))
+uint16_t host_x87_unary(fp80_t const &src, fp80_t &dst, int op)
+{
+    long double ls = fp80_to_ld(src);
+    long double lr;
+    uint16_t sw;
+    switch (op)
+    {
+        case 0: __asm__ volatile("fnclex\n\tfldt %2\n\tfsin\n\tfnstsw %0\n\tfstpt %1"
+                                 : "=m"(sw), "=m"(lr) : "m"(ls)); break;
+        case 1: __asm__ volatile("fnclex\n\tfldt %2\n\tfcos\n\tfnstsw %0\n\tfstpt %1"
+                                 : "=m"(sw), "=m"(lr) : "m"(ls)); break;
+        case 2: __asm__ volatile("fnclex\n\tfldt %2\n\tf2xm1\n\tfnstsw %0\n\tfstpt %1"
+                                 : "=m"(sw), "=m"(lr) : "m"(ls)); break;
+        case 3: __asm__ volatile("fnclex\n\tfldt %2\n\tfrndint\n\tfnstsw %0\n\tfstpt %1"
+                                 : "=m"(sw), "=m"(lr) : "m"(ls)); break;
+    }
+    dst = ld_to_fp80(lr);
+    return sw & ~X87SW_TOP_MASK;
+}
+
+// Single-operand FPU op that produces two results (FSINCOS, FPTAN, FXTRACT).
+// dst1 receives ST(0) after the op (post-FSTP), dst2 receives ST(1).
+// op codes:
+//   0: fsincos  (cos -> dst1, sin -> dst2)
+//   1: fptan    (1.0 -> dst1, tan -> dst2)
+//   2: fxtract  (significand -> dst1, exponent -> dst2)
+uint16_t host_x87_unary2(fp80_t const &src, fp80_t &dst1, fp80_t &dst2, int op)
+{
+    long double ls = fp80_to_ld(src);
+    long double lr1, lr2;
+    uint16_t sw;
+    switch (op)
+    {
+        case 0: __asm__ volatile(
+            "fnclex\n\tfldz\n\tfldt %3\n\tfsincos\n\tfnstsw %0\n\tfstpt %1\n\tfstpt %2"
+            : "=m"(sw), "=m"(lr1), "=m"(lr2) : "m"(ls)); break;
+        case 1: __asm__ volatile(
+            "fnclex\n\tfldz\n\tfldt %3\n\tfptan\n\tfnstsw %0\n\tfstpt %1\n\tfstpt %2"
+            : "=m"(sw), "=m"(lr1), "=m"(lr2) : "m"(ls)); break;
+        case 2: __asm__ volatile(
+            "fnclex\n\tfldt %3\n\tfxtract\n\tfnstsw %0\n\tfstpt %1\n\tfstpt %2"
+            : "=m"(sw), "=m"(lr1), "=m"(lr2) : "m"(ls)); break;
+    }
+    dst1 = ld_to_fp80(lr1);
+    dst2 = ld_to_fp80(lr2);
+    return sw & ~X87SW_TOP_MASK;
+}
+
+// Two-operand transcendentals returning one fp80 + SW.
+// Layout matches the asm wrappers (ARG1 -> ST(0), ARG2 -> ST(1) before the op).
+// op codes:
+//   0: fyl2x    (b * log2(a) -> ST(1), pop)
+//   1: fyl2xp1  (b * log2(a+1) -> ST(1), pop)
+//   2: fpatan   (atan2(b, a) -> ST(1), pop)
+//   3: fprem    (a mod b -> ST(0), keep both)
+//   4: fprem1   (IEEE remainder a / b -> ST(0), keep both)
+//   5: fscale   (a * 2^trunc(b) -> ST(0), keep both)
+uint16_t host_x87_binary_trans(fp80_t const &a, fp80_t const &b, fp80_t &dst, int op)
+{
+    long double la = fp80_to_ld(a);
+    long double lb = fp80_to_ld(b);
+    long double lr;
+    uint16_t sw;
+    switch (op)
+    {
+        case 0: __asm__ volatile(
+            "fnclex\n\tfldt %2\n\tfldt %3\n\tfyl2x\n\tfnstsw %0\n\tfstpt %1"
+            : "=m"(sw), "=m"(lr) : "m"(lb), "m"(la)); break;
+        case 1: __asm__ volatile(
+            "fnclex\n\tfldt %2\n\tfldt %3\n\tfyl2xp1\n\tfnstsw %0\n\tfstpt %1"
+            : "=m"(sw), "=m"(lr) : "m"(lb), "m"(la)); break;
+        case 2: __asm__ volatile(
+            "fnclex\n\tfldt %2\n\tfldt %3\n\tfpatan\n\tfnstsw %0\n\tfstpt %1"
+            : "=m"(sw), "=m"(lr) : "m"(lb), "m"(la)); break;
+        case 3: __asm__ volatile(
+            "fnclex\n\tfldt %2\n\tfldt %3\n\tfprem\n\tfnstsw %0\n\tfstpt %1\n\tfstp %%st(0)"
+            : "=m"(sw), "=m"(lr) : "m"(lb), "m"(la)); break;
+        case 4: __asm__ volatile(
+            "fnclex\n\tfldt %2\n\tfldt %3\n\tfprem1\n\tfnstsw %0\n\tfstpt %1\n\tfstp %%st(0)"
+            : "=m"(sw), "=m"(lr) : "m"(lb), "m"(la)); break;
+        case 5: __asm__ volatile(
+            "fnclex\n\tfldt %2\n\tfldt %3\n\tfscale\n\tfnstsw %0\n\tfstpt %1\n\tfstp %%st(0)"
+            : "=m"(sw), "=m"(lr) : "m"(lb), "m"(la)); break;
+    }
+    dst = ld_to_fp80(lr);
+    return sw & ~X87SW_TOP_MASK;
+}
+
 static uint16_t host_x87_sqrt(fp80_t const &a, fp80_t &dst)
 {
     long double la = fp80_to_ld(a);
