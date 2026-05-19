@@ -576,7 +576,7 @@ bool fp80_t::operator>=(fp80_t const &rhs) const { int c = compare_fp80_3way(*th
 // latter for rounding decisions in hand-rolled arithmetic.
 //
 //===========================================================================
-static x87cw_t read_x87_cw()
+x87cw_t read_x87_cw()
 {
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
     uint16_t cw;
@@ -600,7 +600,7 @@ static x87cw_t read_x87_cw()
 //   PC=00 (single   24-bit): round at bit 40 of mantissa + the extension
 //
 //===========================================================================
-static fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &out_sw)
+fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &out_sw)
 {
     bool neg = v.sign() != 0;
     uint16_t sign_bit = neg ? FP80_SIGN_MASK : 0;

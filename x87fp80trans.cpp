@@ -333,8 +333,9 @@ using fpextfast_t = fpext64_t;
             res += h;
             if (Debug) print_val("res", res);
         }
-        dst = (g * h + g + h).as_fp80();
-        return X87SW_PRECISION_EX;
+        uint16_t flags = X87SW_PRECISION_EX;
+        dst = round_fpext96_to_fp80(g * h + g + h, read_x87_cw(), flags);
+        return flags;
     }
 
 special:
@@ -461,6 +462,10 @@ extern uint16_t host_x87_unary       (fp80_t const &src, fp80_t &dst,           
 extern uint16_t host_x87_unary2      (fp80_t const &src, fp80_t &dst1, fp80_t &dst2,   int op);
 extern uint16_t host_x87_binary_trans(fp80_t const &a,   fp80_t const &b, fp80_t &dst, int op);
 #endif
+
+// From x87fp80.cpp — properly rounded fpext96_t -> fp80 conversion.
+extern fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &out_sw);
+extern x87cw_t read_x87_cw();
 
 uint16_t fp80_t::x87_fxtract(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
 {
