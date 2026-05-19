@@ -681,33 +681,33 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
         else              dst = src2.issnan() ? fp80_t::make_qnan(src2) : src2;
         return snan ? X87SW_INVALID_EX : 0;
     }
+    // Returning a π-based constant: x87 stores 66-bit internal π and rounds
+    // up to 64-bit fp80, setting C1=1 to flag the upward rounding.
+    auto return_pi_const = [&](fpext_t const &c) {
+        dst = round_fpext96_to_fp80(c, read_x87_cw(), flags);
+        return flags | X87SW_PRECISION_EX | X87SW_C1;
+    };
+
     if (src1.ismaxexp())  // src1 = ±inf
     {
         if (src2.isinf())
         {
             // atan2(±inf, ±inf) -> ±pi/4 or ±3pi/4
-            fpext_t r = (src1.sign() == 0) ? (src2.sign() ? npio4_80 : pio4_80)
-                                           : (src2.sign() ? npi3o4_80 : pi3o4_80);
-            dst = round_fpext96_to_fp80(r, read_x87_cw(), flags);
-            return flags | X87SW_PRECISION_EX;
+            return return_pi_const(
+                (src1.sign() == 0) ? (src2.sign() ? npio4_80 : pio4_80)
+                                   : (src2.sign() ? npi3o4_80 : pi3o4_80));
         }
         // atan2(finite, ±inf): 0 if +inf, ±pi if -inf
         if (src1.sign() == 0)
         {
             dst = src2.sign() ? fp80_t::const_nzero() : fp80_t::const_zero();
+            return flags;
         }
-        else
-        {
-            dst = round_fpext96_to_fp80(src2.sign() ? npi80 : pi80, read_x87_cw(), flags);
-            flags |= X87SW_PRECISION_EX;
-        }
-        return flags;
+        return return_pi_const(src2.sign() ? npi80 : pi80);
     }
     if (src2.ismaxexp())   // src2 = ±inf (and src1 finite)
     {
-        // atan2(±inf, finite) -> ±pi/2
-        dst = round_fpext96_to_fp80(src2.sign() ? npio2_80 : pio2_80, read_x87_cw(), flags);
-        return flags | X87SW_PRECISION_EX;
+        return return_pi_const(src2.sign() ? npio2_80 : pio2_80);
     }
     if (src1.iszero())
     {
@@ -719,23 +719,18 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
                 dst = src2.sign() ? fp80_t::const_nzero() : fp80_t::const_zero();
                 return flags;
             }
-            dst = round_fpext96_to_fp80(src2.sign() ? npi80 : pi80, read_x87_cw(), flags);
-            return flags | X87SW_PRECISION_EX;
+            return return_pi_const(src2.sign() ? npi80 : pi80);
         }
-        // atan2(±finite!=0, ±0) -> ±pi/2
-        dst = round_fpext96_to_fp80(src2.sign() ? npio2_80 : pio2_80, read_x87_cw(), flags);
-        return flags | X87SW_PRECISION_EX;
+        return return_pi_const(src2.sign() ? npio2_80 : pio2_80);
     }
     if (src2.iszero())
     {
-        // atan2(0, x) for x≠0: +0 if x>0, ±pi if x<0
         if (src1.sign() == 0)
         {
             dst = src2.sign() ? fp80_t::const_nzero() : fp80_t::const_zero();
             return flags;
         }
-        dst = round_fpext96_to_fp80(src2.sign() ? npi80 : pi80, read_x87_cw(), flags);
-        return flags | X87SW_PRECISION_EX;
+        return return_pi_const(src2.sign() ? npi80 : pi80);
     }
 
     // Cephes long-double polynomial (fp80-precision coefficients).
@@ -1011,9 +1006,9 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     fpext_t two(0x8000000000000000ull, 0x00000000, 1, 0);
     fpext_t logm = two * s * poly;     // log(m) (natural log)
 
-    // log2(m) = log(m) / log(2)
-    static fpext_t const ln2(0xb17217f7d1cf79abull, 0xc9e3b398, -1, 0);     // ln(2)
-    fpext_t log2_m = logm.div64(ln2);
+    // log2(m) = log(m) * (1/ln(2))
+    static fpext_t const invln2(0xb8aa3b295c17f0bbull, 0xbe87fed0, 0, 0);
+    fpext_t log2_m = logm * invln2;
 
     // log2(src1) = k + log2(m)
     fpext_t k_ext;
@@ -1040,7 +1035,137 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     return flags;
 }
 
-uint16_t fp80_t::x87_fyl2xp1(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fyl2xp1); }
+//
+// fyl2xp1: compute src2 * log2(1 + src1). Same series as fyl2x but with
+// the (m-1)/(m+1) substitution becoming src1/(src1+2), avoiding the
+// catastrophic cancellation that explicit 1+src1 would produce.
+//
+uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
+{
+    using fpext_t = fpext96_t;
+
+    uint16_t flags = 0;
+    if (src1.isdenorm() || src2.isdenorm()) flags |= X87SW_DENORM_EX;
+
+    if (src1.isnan() || src2.isnan())
+    {
+        bool snan = src1.issnan() || src2.issnan();
+        if (src1.isnan()) dst = src1.issnan() ? fp80_t::make_qnan(src1) : src1;
+        else              dst = src2.issnan() ? fp80_t::make_qnan(src2) : src2;
+        return snan ? X87SW_INVALID_EX : 0;
+    }
+    // src1 = -inf or src1 < -1 → indef (log of negative).
+    if (src1.ismaxexp() && src1.sign())
+    {
+        dst = fp80_t::const_indef();
+        return X87SW_INVALID_EX;
+    }
+    if (src1.sign() && !src1.isinf() && !src1.iszero())
+    {
+        if (src1.sign_exp() > 0xBFFF ||
+            (src1.sign_exp() == 0xBFFF && src1.mantissa() > FP80_EXPLICIT_ONE))
+        {
+            dst = fp80_t::const_indef();
+            return X87SW_INVALID_EX;
+        }
+        // src1 == -1 → log(0) = -inf (handled below as DZ)
+        if (src1.sign_exp() == 0xBFFF && src1.mantissa() == FP80_EXPLICIT_ONE)
+        {
+            if (src2.iszero())
+            {
+                dst = fp80_t::const_indef();
+                return X87SW_INVALID_EX;
+            }
+            dst = (src2.sign() == 0) ? fp80_t::const_ninf() : fp80_t::const_pinf();
+            return flags | X87SW_DIVZERO_EX;
+        }
+    }
+    // src1 = +inf: result is src2 * inf. If src2=0, NaN; else signed inf.
+    if (src1.isinf())   // src1 = +inf (we filtered -inf above)
+    {
+        if (src2.iszero())
+        {
+            dst = fp80_t::const_indef();
+            return X87SW_INVALID_EX;
+        }
+        dst = src2.sign() ? fp80_t::const_ninf() : fp80_t::const_pinf();
+        return flags;
+    }
+    // src2 = ±inf and src1 is finite.
+    if (src2.ismaxexp())
+    {
+        if (src1.iszero())
+        {
+            // log2(1) = 0; 0 * inf = indef.
+            dst = fp80_t::const_indef();
+            return X87SW_INVALID_EX;
+        }
+        bool log_neg = src1.sign() != 0;
+        bool result_neg = log_neg ^ (src2.sign() != 0);
+        dst = result_neg ? fp80_t::const_ninf() : fp80_t::const_pinf();
+        return flags;
+    }
+    // src2 = 0 with finite src1 (and src1 in valid domain): result is ±0.
+    if (src2.iszero())
+    {
+        bool result_neg = (src2.sign() != 0) ^ (src1.sign() != 0);
+        dst = result_neg ? fp80_t::const_nzero() : fp80_t::const_zero();
+        return flags;
+    }
+    if (src1.iszero())
+    {
+        // log2(1) = 0; src2 * 0 = signed zero (sign of src2).
+        dst = src2.sign() ? fp80_t::const_nzero() : fp80_t::const_zero();
+        return flags;
+    }
+
+    // log(1 + x) via the (1+x - 1) / (1+x + 1) = x/(x+2) substitution.
+    // Use fp80 division to handle the full fp80 range (div64 overflows in
+    // fp64 land for huge src1).
+    fp80_t two_fp80(0x8000000000000000ull, 0x4000);   // 2.0
+    fp80_t denom_fp80;
+    fp80_t::x87_fadd(src1, two_fp80, denom_fp80);
+    fp80_t s_fp80;
+    fp80_t::x87_fdivr(denom_fp80, src1, s_fp80);   // s = src1 / denom
+    if (s_fp80.ismaxexp() || denom_fp80.ismaxexp())
+    {
+        // Numerical edge — fall back to via_fp64 to get something reasonable.
+        return via_fp64_binary(src1, src2, dst, &fp64_t::x87_fyl2xp1);
+    }
+
+    fpext_t one(0x8000000000000000ull, 0x00000000, 0, 0);
+    fpext_t two(0x8000000000000000ull, 0x00000000, 1, 0);
+    fpext_t s(s_fp80);
+    fpext_t s2 = s * s;
+
+    static fpext_t const c1_3(0xaaaaaaaaaaaaaaaaull, 0xaaaaaaab, -2, 0);
+    static fpext_t const c1_5(0xccccccccccccccccull, 0xcccccccd, -3, 0);
+    static fpext_t const c1_7(0x9249249249249249ull, 0x24924925, -3, 0);
+    static fpext_t const c1_9(0xe38e38e38e38e38eull, 0x38e38e39, -4, 0);
+    static fpext_t const c1_11(0xba2e8ba2e8ba2e8bull, 0xa2e8ba2f, -4, 0);
+    static fpext_t const c1_13(0x9d89d89d89d89d89ull, 0xd89d89d9, -4, 0);
+
+    fpext_t poly = c1_13 * s2 + c1_11;
+    poly = poly * s2 + c1_9;
+    poly = poly * s2 + c1_7;
+    poly = poly * s2 + c1_5;
+    poly = poly * s2 + c1_3;
+    poly = poly * s2 + one;
+
+    fpext_t logm = two * s * poly;
+
+    // Multiply by 1/ln(2) instead of dividing by ln(2) — avoids div64's
+    // fp64-precision bottleneck (which can overflow for huge values).
+    static fpext_t const invln2(0xb8aa3b295c17f0bbull, 0xbe87fed0, 0, 0);
+    fpext_t log2_x = logm * invln2;
+
+    fpext_t s2_ext(src2);
+    fpext_t result = log2_x * s2_ext;
+
+    flags |= X87SW_PRECISION_EX;
+    dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
+    return flags;
+}
 uint16_t fp80_t::x87_fsin   (fp80_t const &a, fp80_t &dst)                  { return via_fp64_unary(a, dst, &fp64_t::x87_fsin); }
 uint16_t fp80_t::x87_fcos   (fp80_t const &a, fp80_t &dst)                  { return via_fp64_unary(a, dst, &fp64_t::x87_fcos); }
 uint16_t fp80_t::x87_fsincos(fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return via_fp64_unary2(a, d1, d2, &fp64_t::x87_fsincos); }
