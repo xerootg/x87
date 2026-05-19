@@ -97,12 +97,12 @@ public:
     //
     // comparison operations
     //
-    inline bool operator==(fp80_t const &rhs) { return (this->sign_exp() == rhs.sign_exp() && this->mantissa() == rhs.mantissa()); }
-    inline bool operator!=(fp80_t const &rhs) { return (this->sign_exp() != rhs.sign_exp() || this->mantissa() != rhs.mantissa()); }
-    // NYI inline bool operator<(fp80_t const &rhs) { return (this->as_double() < rhs.as_double()); }
-    // NYI inline bool operator<=(fp80_t const &rhs) { return (this->as_double() <= rhs.as_double()); }
-    // NYI inline bool operator>(fp80_t const &rhs) { return (this->as_double() > rhs.as_double()); }
-    // NYI inline bool operator>=(fp80_t const &rhs) { return (this->as_double() >= rhs.as_double()); }
+    inline bool operator==(fp80_t const &rhs) const { return (this->sign_exp() == rhs.sign_exp() && this->mantissa() == rhs.mantissa()); }
+    inline bool operator!=(fp80_t const &rhs) const { return (this->sign_exp() != rhs.sign_exp() || this->mantissa() != rhs.mantissa()); }
+    bool operator< (fp80_t const &rhs) const;   // STUB: not yet implemented
+    bool operator<=(fp80_t const &rhs) const;   // STUB: not yet implemented
+    bool operator> (fp80_t const &rhs) const;   // STUB: not yet implemented
+    bool operator>=(fp80_t const &rhs) const;   // STUB: not yet implemented
 
     //
     // pieces
@@ -161,30 +161,54 @@ public:
     //
     static fp80_t abs(fp80_t const &src) { fp80_t res = src; res.m_sign_exp &= ~FP80_SIGN_MASK; return res; }
     static fp80_t chs(fp80_t const &src) { fp80_t res = src; res.m_sign_exp ^= FP80_SIGN_MASK; return res; }
-    // NYI static fp80_t sqrt(fp80_t const &src);
-    // NYI static fp80_t floor(fp80_t const &src);
-    // NYI static fp80_t ceil(fp80_t const &src);
+    static fp80_t sqrt(fp80_t const &src);   // STUB: not yet implemented
+    static fp80_t floor(fp80_t const &src);  // STUB: not yet implemented
+    static fp80_t ceil(fp80_t const &src);   // STUB: not yet implemented
 
     //
     // static transcendental ops
     //
-    // NYI static fp80_t ldexp(fp80_t const &a, int32_t factor);
+    static fp80_t ldexp(fp80_t const &a, int32_t factor);  // STUB: not yet implemented
 
     //
     // x87 ops
     //
-    // NYI static uint16_t x87_fxtract(fp80_t const &src, fp80_t &dst1, fp80_t &dst2);
-    // NYI static uint16_t x87_fscale(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
-    // NYI static uint16_t x87_fprem(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
-    // NYI static uint16_t x87_fprem1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
-    // NYI static uint16_t x87_f2xm1(fp80_t const &src, fp80_t &dst);
-    // NYI static uint16_t x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
-    // NYI static uint16_t x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
-    // NYI static uint16_t x87_fsin(fp80_t const &src, fp80_t &dst);
-    // NYI static uint16_t x87_fcos(fp80_t const &src, fp80_t &dst);
-    // NYI static uint16_t x87_fsincos(fp80_t const &src, fp80_t &dst1, fp80_t &dst2);
-    // NYI static uint16_t x87_fptan(fp80_t const &src, fp80_t &dst1, fp80_t &dst2);
-    // NYI static uint16_t x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
+    static uint16_t x87_fxtract(fp80_t const &src, fp80_t &dst1, fp80_t &dst2);                    // STUB
+    static uint16_t x87_fscale(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);               // STUB
+    static uint16_t x87_fprem(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);                // STUB
+    static uint16_t x87_fprem1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);               // STUB
+    static uint16_t x87_f2xm1(fp80_t const &src, fp80_t &dst);                                     // implemented
+    static uint16_t x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);                // STUB
+    static uint16_t x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);              // STUB
+    static uint16_t x87_fsin(fp80_t const &src, fp80_t &dst);                                      // STUB
+    static uint16_t x87_fcos(fp80_t const &src, fp80_t &dst);                                      // STUB
+    static uint16_t x87_fsincos(fp80_t const &src, fp80_t &dst1, fp80_t &dst2);                    // STUB
+    static uint16_t x87_fptan(fp80_t const &src, fp80_t &dst1, fp80_t &dst2);                      // STUB
+    static uint16_t x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);               // STUB
+    static uint16_t x87_frndint(fp80_t const &src, fp80_t &dst);                                   // STUB
+
+    // SW-returning arithmetic. operator+/-/*// don't carry a status word;
+    // these entry points expose what the FPU actually puts in C1 (roundup),
+    // and the precision/under/over/invalid exception bits. STUBS for now.
+    static uint16_t x87_fadd (fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
+    static uint16_t x87_fsub (fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
+    static uint16_t x87_fsubr(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
+    static uint16_t x87_fmul (fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
+    static uint16_t x87_fdiv (fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
+    static uint16_t x87_fdivr(fp80_t const &src1, fp80_t const &src2, fp80_t &dst);
+    static uint16_t x87_fsqrt(fp80_t const &src, fp80_t &dst);
+
+    // Classification / compare entry points. Each returns the resulting SW;
+    // x87_fxam sets only C0/C1/C2/C3 (no other side effect), x87_ftst is the
+    // compare-against-0 form, x87_fcom signals on QNaN, x87_fucom doesn't.
+    // x87_fcomi is the P6+ variant that writes EFLAGS-style result bits;
+    // we return them packed into the same C0/C2/C3 layout for test parity.
+    static uint16_t x87_fxam  (fp80_t const &src);
+    static uint16_t x87_ftst  (fp80_t const &src);
+    static uint16_t x87_fcom  (fp80_t const &src1, fp80_t const &src2);
+    static uint16_t x87_fucom (fp80_t const &src1, fp80_t const &src2);
+    static uint16_t x87_fcomi (fp80_t const &src1, fp80_t const &src2);
+    static uint16_t x87_fucomi(fp80_t const &src1, fp80_t const &src2);
 
     //
     // floating point load helpers

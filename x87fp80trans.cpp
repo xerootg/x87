@@ -117,6 +117,7 @@
 //==========================================================
 
 #include "x87fp80.h"
+#include "x87fpext.h"
 
 #include <cstdint>
 #include <cmath>
@@ -394,5 +395,52 @@ uint16_t fp80_t::x87_f2xm1(fp80_t const &src, fp80_t &dst)
 {
     return x87_f2xm1_core<false>(src, dst);
 }
+
+
+//===========================================================================
+//
+// STUBS for unimplemented 80-bit transcendentals. Each writes the FPU
+// "indefinite" value and sets the invalid-operation flag so the test
+// harness will report a clean 100% failure for the missing operation.
+//
+//===========================================================================
+
+static uint16_t stub_unary(fp80_t &dst)
+{
+    dst = fp80_t::const_indef();
+    return X87SW_INVALID_EX;
+}
+
+static uint16_t stub_unary2(fp80_t &dst1, fp80_t &dst2)
+{
+    dst1 = fp80_t::const_indef();
+    dst2 = fp80_t::const_indef();
+    return X87SW_INVALID_EX;
+}
+
+uint16_t fp80_t::x87_fxtract(fp80_t const &, fp80_t &dst1, fp80_t &dst2)              { return stub_unary2(dst1, dst2); }
+uint16_t fp80_t::x87_fscale(fp80_t const &, fp80_t const &, fp80_t &dst)              { return stub_unary(dst); }
+uint16_t fp80_t::x87_fprem(fp80_t const &, fp80_t const &, fp80_t &dst)               { return stub_unary(dst); }
+uint16_t fp80_t::x87_fprem1(fp80_t const &, fp80_t const &, fp80_t &dst)              { return stub_unary(dst); }
+uint16_t fp80_t::x87_fyl2x(fp80_t const &, fp80_t const &, fp80_t &dst)               { return stub_unary(dst); }
+uint16_t fp80_t::x87_fyl2xp1(fp80_t const &, fp80_t const &, fp80_t &dst)             { return stub_unary(dst); }
+uint16_t fp80_t::x87_fsin(fp80_t const &, fp80_t &dst)                                { return stub_unary(dst); }
+uint16_t fp80_t::x87_fcos(fp80_t const &, fp80_t &dst)                                { return stub_unary(dst); }
+uint16_t fp80_t::x87_fsincos(fp80_t const &, fp80_t &dst1, fp80_t &dst2)              { return stub_unary2(dst1, dst2); }
+uint16_t fp80_t::x87_fptan(fp80_t const &, fp80_t &dst1, fp80_t &dst2)                { return stub_unary2(dst1, dst2); }
+uint16_t fp80_t::x87_fpatan(fp80_t const &, fp80_t const &, fp80_t &dst)              { return stub_unary(dst); }
+uint16_t fp80_t::x87_frndint(fp80_t const &, fp80_t &dst)                             { return stub_unary(dst); }
+
+// Classification and compare stubs. These return 0 (no flags set) which is
+// clearly wrong for any non-trivial input; tests will report ~100% failure
+// against fxam/ftst/fcom/fucom on the real CPU. fxam's "all bits 0" output
+// happens to encode "unsupported", so even zero-input behavior shows as
+// failure (good — clear signal that this is unimplemented).
+uint16_t fp80_t::x87_fxam  (fp80_t const &)                   { return 0; }
+uint16_t fp80_t::x87_ftst  (fp80_t const &)                   { return 0; }
+uint16_t fp80_t::x87_fcom  (fp80_t const &, fp80_t const &)   { return 0; }
+uint16_t fp80_t::x87_fucom (fp80_t const &, fp80_t const &)   { return 0; }
+uint16_t fp80_t::x87_fcomi (fp80_t const &, fp80_t const &)   { return 0; }
+uint16_t fp80_t::x87_fucomi(fp80_t const &, fp80_t const &)   { return 0; }
 
 }

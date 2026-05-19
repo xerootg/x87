@@ -1,11 +1,12 @@
-//cl /EHsc /Zi /std:c++20 x87test.cpp x87testasm.obj
+// Build (Windows):  cl /EHsc /Zi /std:c++20 x87test.cpp x87testasm.obj
+// Build (Linux):    see Makefile (g++ -std=c++20 x87test.cpp x87testasm.o)
 
 #include <stdio.h>
 #include <stdint.h>
 #include <vector>
 #include <format>
 #include <assert.h>
-#include <windows.h>
+#include <chrono>
 
 //
 // references:
@@ -15,6 +16,7 @@
 
 #include "../x87fp64trans.cpp"
 #include "../x87fp80.cpp"
+#include "../x87fp80trans.cpp"
 #include "../x87fpext.h"
 #undef print_val
 
@@ -62,6 +64,16 @@ extern "C"
     uint16_t fscale80(fp80_t *src1, fp80_t *src2, fp80_t *dst);
     uint16_t fsin80(fp80_t *src, fp80_t *dst);
     uint16_t fcos80(fp80_t *src, fp80_t *dst);
+    uint16_t fcmp80(fp80_t const *src1, fp80_t const *src2);
+    uint16_t fxam80(fp80_t const *src);
+    uint16_t fabs80(fp80_t const *src, fp80_t *dst);
+    uint16_t fchs80(fp80_t const *src, fp80_t *dst);
+    uint16_t fsubr80(fp80_t const *src1, fp80_t const *src2, fp80_t *dst);
+    uint16_t fdivr80(fp80_t const *src1, fp80_t const *src2, fp80_t *dst);
+    uint16_t ftst80(fp80_t const *src);
+    uint16_t fcom80(fp80_t const *src1, fp80_t const *src2);
+    uint16_t fcomi80(fp80_t const *src1, fp80_t const *src2);
+    uint16_t fucomi80(fp80_t const *src1, fp80_t const *src2);
 
     uint16_t fadd64(fp64_t *src1, fp64_t *src2, fp64_t *dst);
     uint16_t fsub64(fp64_t *src1, fp64_t *src2, fp64_t *dst);
@@ -86,7 +98,7 @@ extern "C"
 //
 // global variables
 //
-uint64_t min_timing_ticks;
+std::chrono::nanoseconds min_timing_duration;
 std::vector<fp80_t> values80;
 std::vector<fp64_t> values64;
 std::vector<float> values32;
@@ -94,7 +106,7 @@ std::vector<int64_t> valuesi64;
 std::vector<int32_t> valuesi32;
 std::vector<int16_t> valuesi16;
 
-#define MAX_PRINT_ERRORS 300000
+#define MAX_PRINT_ERRORS 1000
 
 //
 // print helper since we're C++20
@@ -788,9 +800,9 @@ void test_unary64(FpFuncType fpfunc, X87FuncType x87func, char const *name, int 
                 fpfunc(src1, res);
             });
     }
-    LARGE_INTEGER start, end;
-    QueryPerformanceCounter(&start);
+    auto start = std::chrono::steady_clock::now();
     size_t reps = 0;
+    std::chrono::nanoseconds elapsed;
     do
     {
         for (int isrc1 = 0; isrc1 < values64.size(); isrc1++)
@@ -799,9 +811,9 @@ void test_unary64(FpFuncType fpfunc, X87FuncType x87func, char const *name, int 
             fpfunc(values64[isrc1], ourdst);
         }
         reps += values64.size();
-        QueryPerformanceCounter(&end);
-    } while (end.QuadPart - start.QuadPart < min_timing_ticks);
-    eprint("{}: ticks = {:.2f}\n", name, double(end.QuadPart - start.QuadPart) / double(reps));
+        elapsed = std::chrono::steady_clock::now() - start;
+    } while (elapsed < min_timing_duration);
+    eprint("{}: ns/op = {:.2f}\n", name, double(elapsed.count()) / double(reps));
     errs.print_report(name);
 }
 
@@ -837,9 +849,9 @@ void test_unary64_2(FpFuncType fpfunc, X87FuncType x87func, char const *name, in
                 fpfunc(src1, res1, res2);
             }, true);
     }
-    LARGE_INTEGER start, end;
-    QueryPerformanceCounter(&start);
+    auto start = std::chrono::steady_clock::now();
     size_t reps = 0;
+    std::chrono::nanoseconds elapsed;
     do
     {
         for (int isrc1 = 0; isrc1 < values64.size(); isrc1++)
@@ -848,9 +860,9 @@ void test_unary64_2(FpFuncType fpfunc, X87FuncType x87func, char const *name, in
             fpfunc(values64[isrc1], ourdst1, ourdst2);
         }
         reps += values64.size();
-        QueryPerformanceCounter(&end);
-    } while (end.QuadPart - start.QuadPart < min_timing_ticks);
-    eprint("{}: ticks = {:.2f}\n", name, double(end.QuadPart - start.QuadPart) / double(reps));
+        elapsed = std::chrono::steady_clock::now() - start;
+    } while (elapsed < min_timing_duration);
+    eprint("{}: ns/op = {:.2f}\n", name, double(elapsed.count()) / double(reps));
     errs.print_report(name);
 }
 
@@ -883,10 +895,10 @@ void test_binary64(FpFuncType fpfunc, X87FuncType x87func, char const *name, int
                 });
         }
     }
-    LARGE_INTEGER start, end;
-    QueryPerformanceCounter(&start);
+    auto start = std::chrono::steady_clock::now();
     size_t reps = 0;
     int initial = 0;
+    std::chrono::nanoseconds elapsed;
     do
     {
         for (int isrc1 = ++initial; isrc1 < values64.size(); isrc1 += 23)
@@ -896,9 +908,9 @@ void test_binary64(FpFuncType fpfunc, X87FuncType x87func, char const *name, int
                 fpfunc(values64[isrc2], values64[isrc1], ourdst);
             }
         reps += ((values64.size() - initial) / 23) * ((values64.size() - initial - 1) / 17);
-        QueryPerformanceCounter(&end);
-    } while (end.QuadPart - start.QuadPart < min_timing_ticks);
-    eprint("{}: ticks = {:.2f}\n", name, double(end.QuadPart - start.QuadPart) / double(reps));
+        elapsed = std::chrono::steady_clock::now() - start;
+    } while (elapsed < min_timing_duration);
+    eprint("{}: ns/op = {:.2f}\n", name, double(elapsed.count()) / double(reps));
     errs.print_report(name);
 }
 
@@ -923,21 +935,543 @@ void test_unary80(FpFuncType fpfunc, X87FuncType x87func, char const *name, int 
             [&]() { print("{}({:04X}:{:016X} [{:+.12e}])", name, src1.sign_exp(), src1.mantissa(), src1.as_double()); },
             [&]() { fp80_t res; fpfunc(src1, res); });
     }
-    LARGE_INTEGER start, end;
-    QueryPerformanceCounter(&start);
+    auto start = std::chrono::steady_clock::now();
     size_t reps = 0;
+    std::chrono::nanoseconds elapsed;
     do
     {
-        for (int isrc1 = 0; isrc1 < values64.size(); isrc1++)
+        for (int isrc1 = 0; isrc1 < values80.size(); isrc1++)
         {
-            fp64_t ourdst;
-            fpfunc(values64[isrc1], ourdst);
+            fp80_t ourdst;
+            fpfunc(values80[isrc1], ourdst);
         }
-        reps += values64.size();
-        QueryPerformanceCounter(&end);
-    } while (end.QuadPart - start.QuadPart < min_timing_ticks);
-    eprint("{}: ticks = {:.2f}\n", name, double(end.QuadPart - start.QuadPart) / double(reps));
+        reps += values80.size();
+        elapsed = std::chrono::steady_clock::now() - start;
+    } while (elapsed < min_timing_duration);
+    eprint("{}: ns/op = {:.2f}\n", name, double(elapsed.count()) / double(reps));
     errs.print_report(name);
+}
+
+//
+// test an 80-bit unary operation with two results
+//
+template<typename FpFuncType, typename X87FuncType>
+void test_unary80_2(FpFuncType fpfunc, X87FuncType x87func, char const *name, int print_thresh)
+{
+    errors_t errs(name, print_thresh);
+    for (int isrc1 = 0; isrc1 < values80.size(); isrc1++)
+    {
+        fp80_t src1(values80[isrc1]);
+
+        fp80_t x87dst1, x87dst2;
+        auto x87sw = x87func(&src1, &x87dst1, &x87dst2) & ~X87SW_TOP_MASK;
+
+        fp80_t ourdst1, ourdst2;
+        auto oursw = fpfunc(src1, ourdst1, ourdst2) & ~X87SW_TOP_MASK;
+
+        errs.check_value(ourdst1, x87dst1, oursw, x87sw,
+            [&]() { print("{}({:04X}:{:016X} [{:+.12e}])[1]", name, src1.sign_exp(), src1.mantissa(), src1.as_double()); },
+            [&]() { fp80_t r1, r2; fpfunc(src1, r1, r2); });
+        errs.check_value(ourdst2, x87dst2, oursw, oursw,
+            [&]() { print("{}({:04X}:{:016X} [{:+.12e}])[2]", name, src1.sign_exp(), src1.mantissa(), src1.as_double()); },
+            [&]() { fp80_t r1, r2; fpfunc(src1, r1, r2); }, true);
+    }
+    auto start = std::chrono::steady_clock::now();
+    size_t reps = 0;
+    std::chrono::nanoseconds elapsed;
+    do
+    {
+        for (int isrc1 = 0; isrc1 < values80.size(); isrc1++)
+        {
+            fp80_t ourdst1, ourdst2;
+            fpfunc(values80[isrc1], ourdst1, ourdst2);
+        }
+        reps += values80.size();
+        elapsed = std::chrono::steady_clock::now() - start;
+    } while (elapsed < min_timing_duration);
+    eprint("{}: ns/op = {:.2f}\n", name, double(elapsed.count()) / double(reps));
+    errs.print_report(name);
+}
+
+//
+// test an 80-bit binary operation
+//
+template<typename FpFuncType, typename X87FuncType>
+void test_binary80(FpFuncType fpfunc, X87FuncType x87func, char const *name, int print_thresh)
+{
+    errors_t errs(name, print_thresh);
+    for (int isrc1 = 0; isrc1 < values80.size(); isrc1 += 5)
+    {
+        fp80_t src1(values80[isrc1]);
+        for (int isrc2 = 0; isrc2 < values80.size(); isrc2 += 5)
+        {
+            fp80_t src2(values80[isrc2]);
+
+            fp80_t x87dst;
+            auto x87sw = x87func(&src2, &src1, &x87dst) & ~X87SW_TOP_MASK;
+
+            fp80_t ourdst;
+            auto oursw = fpfunc(src2, src1, ourdst) & ~X87SW_TOP_MASK;
+
+            errs.check_value(ourdst, x87dst, oursw, x87sw,
+                [&]() { print("{}({:04X}:{:016X} [{:+.12e}], {:04X}:{:016X} [{:+.12e}])",
+                    name,
+                    src2.sign_exp(), src2.mantissa(), src2.as_double(),
+                    src1.sign_exp(), src1.mantissa(), src1.as_double()); },
+                [&]() { fp80_t r; fpfunc(src2, src1, r); });
+        }
+    }
+    auto start = std::chrono::steady_clock::now();
+    size_t reps = 0;
+    int initial = 0;
+    std::chrono::nanoseconds elapsed;
+    do
+    {
+        for (int isrc1 = ++initial; isrc1 < values80.size(); isrc1 += 23)
+            for (int isrc2 = initial + 1; isrc2 < values80.size(); isrc2 += 17)
+            {
+                fp80_t ourdst;
+                fpfunc(values80[isrc2], values80[isrc1], ourdst);
+            }
+        reps += ((values80.size() - initial) / 23) * ((values80.size() - initial - 1) / 17);
+        elapsed = std::chrono::steady_clock::now() - start;
+    } while (elapsed < min_timing_duration);
+    eprint("{}: ns/op = {:.2f}\n", name, double(elapsed.count()) / double(reps));
+    errs.print_report(name);
+}
+
+//
+// 80-bit wrappers around the free-function arithmetic operators so they can
+// be passed to test_binary80 (which expects a uniform (a, b, &dst) -> sw API).
+//
+inline uint16_t fp80_add_wrap(fp80_t const &a, fp80_t const &b, fp80_t &dst) { dst = a + b; return 0; }
+inline uint16_t fp80_sub_wrap(fp80_t const &a, fp80_t const &b, fp80_t &dst) { dst = a - b; return 0; }
+inline uint16_t fp80_mul_wrap(fp80_t const &a, fp80_t const &b, fp80_t &dst) { dst = a * b; return 0; }
+inline uint16_t fp80_div_wrap(fp80_t const &a, fp80_t const &b, fp80_t &dst) { dst = a / b; return 0; }
+inline uint16_t fp80_sqrt_wrap(fp80_t const &a, fp80_t &dst) { dst = fp80_t::sqrt(a); return 0; }
+
+//
+// Test that fp80_t's built-in static constants match the real FPU. The first
+// seven slots come from fld1/fldl2t/fldl2e/fldpi/fldlg2/fldln2/fldz; the next
+// six are derived (nzero via fldz+fchs, pinf/ninf/indef via 1/0,-1/0,0/0) or
+// memory-roundtripped (snan, qnan) — see x87consts80 in x87testasm.asm.
+//
+void test_consts80()
+{
+    errors_t errs("consts(80)", 0);
+    fp80_t fpu[13];
+    x87consts80(fpu);
+    fp80_t ours[13] = {
+        fp80_t::const_one(),
+        fp80_t::const_l2t(),
+        fp80_t::const_l2e(),
+        fp80_t::const_pi(),
+        fp80_t::const_lg2(),
+        fp80_t::const_ln2(),
+        fp80_t::const_zero(),
+        fp80_t::const_nzero(),
+        fp80_t::const_pinf(),
+        fp80_t::const_ninf(),
+        fp80_t::const_snan(),
+        fp80_t::const_qnan(),
+        fp80_t::const_indef(),
+    };
+    static char const * const names[13] = {
+        "one", "l2t", "l2e", "pi", "lg2", "ln2", "zero",
+        "nzero", "pinf", "ninf", "snan", "qnan", "indef"
+    };
+    for (int i = 0; i < 13; i++)
+    {
+        errs.check_value(ours[i], fpu[i], 0, 0,
+            [&]() { print("const_{}", names[i]); },
+            [&]() {});
+    }
+    errs.print_report("consts(80)");
+}
+
+//
+// Test fp80_t's classification predicates against FXAM.
+//
+// Per Intel x87 spec, Table 8-1, FXAM returns:
+//   C3:C2:C0 = 000  Unsupported
+//             001  NaN
+//             010  Normal finite
+//             011  Infinity
+//             100  Zero
+//             101  Empty (stack slot)
+//             110  Denormal
+//             111  Empty
+// and C1 = sign of the operand.
+//
+// We test each predicate is consistent with the FPU's classification. isqnan
+// vs issnan can't be distinguished by FXAM (both are NaN to FXAM), so we
+// derive the expected from the bit pattern (mantissa MSB after the explicit
+// one) — but only over values FXAM agrees are NaN, so a mis-classifying NaN
+// would still be flagged.
+//
+void test_predicates80()
+{
+    errors_t errs("preds(80)", 0);
+    int const C3 = X87SW_C3, C2 = X87SW_C2, C0 = X87SW_C0, C1 = X87SW_C1;
+    for (int i = 0; i < int(values80.size()); i++)
+    {
+        fp80_t const &v = values80[i];
+        uint16_t sw = fxam80(&v);
+        bool fxam_nan       = (sw & (C3|C2|C0)) == C0;
+        bool fxam_normfin   = (sw & (C3|C2|C0)) == C2;
+        bool fxam_inf       = (sw & (C3|C2|C0)) == (C2|C0);
+        bool fxam_zero      = (sw & (C3|C2|C0)) == C3;
+        bool fxam_denorm    = (sw & (C3|C2|C0)) == (C3|C2);
+        bool fxam_unsup     = (sw & (C3|C2|C0)) == 0;
+        bool fxam_sign      = (sw & C1) != 0;
+
+        // Build a list of (name, ours, expected) tuples and check each.
+        struct entry { char const *name; bool ours; bool expected; };
+        // fp80_t::isnormal() returns true for normal *or* zero (i.e., bits are
+        // already in canonical form). The FPU has no single class for this;
+        // it's the union of "normal finite" and "zero".
+        bool exp_isnormal = fxam_normfin || fxam_zero;
+        bool exp_ispinf   = fxam_inf && !fxam_sign;
+        bool exp_isninf   = fxam_inf && fxam_sign;
+        // qnan vs snan: only meaningful when FXAM agrees this is a NaN.
+        bool exp_isqnan = fxam_nan && ((v.mantissa() & FP80_MANTISSA_MASK) >= 0x4000000000000000ull);
+        bool exp_issnan = fxam_nan && !exp_isqnan;
+
+        entry checks[] = {
+            { "isnan",    v.isnan(),    fxam_nan    },
+            { "isinf",    v.isinf(),    fxam_inf    },
+            { "iszero",   v.iszero(),   fxam_zero   },
+            { "isdenorm", v.isdenorm(), fxam_denorm },
+            { "isnormal", v.isnormal(), exp_isnormal },
+            { "ispinf",   v.ispinf(),   exp_ispinf  },
+            { "isninf",   v.isninf(),   exp_isninf  },
+            { "isqnan",   v.isqnan(),   exp_isqnan  },
+            { "issnan",   v.issnan(),   exp_issnan  },
+            // "sign()" is exposed as a uint8_t getter; verify against FXAM C1.
+            // Unsupported encodings don't have a meaningful FXAM sign, so we
+            // only check when FXAM gave us a classification.
+        };
+
+        for (auto const &c : checks)
+        {
+            errs.count++;
+            if (c.ours != c.expected)
+            {
+                errs.experrors++;
+                if (errs.printed++ < MAX_PRINT_ERRORS)
+                    print("{}({:04X}:{:016X}) = {} (FXAM sw={:04X}, expected {})\n",
+                        c.name, v.sign_exp(), v.mantissa(),
+                        c.ours ? "true" : "false", sw,
+                        c.expected ? "true" : "false");
+            }
+            else
+                errs.matches++;
+        }
+
+        // sign() consistency, but only for non-unsupported encodings
+        if (!fxam_unsup)
+        {
+            bool exp_sign = fxam_sign;
+            bool our_sign = (v.sign() != 0);
+            errs.count++;
+            if (our_sign != exp_sign)
+            {
+                errs.experrors++;
+                if (errs.printed++ < MAX_PRINT_ERRORS)
+                    print("sign({:04X}:{:016X}) = {} (FXAM C1 says {})\n",
+                        v.sign_exp(), v.mantissa(),
+                        our_sign ? "true" : "false",
+                        exp_sign ? "true" : "false");
+            }
+            else
+                errs.matches++;
+        }
+    }
+    errs.print_report("preds(80)");
+}
+
+//
+// Sign manipulation: abs() clears the sign, chs() flips it, copysign(a,b)
+// transplants b's sign onto a, samesign() reports whether two values agree.
+//
+// fabs / fchs map to FPU instructions of the same name. copysign / samesign
+// have no x87 instruction; the oracle is bit-pattern manipulation of the
+// fp80_t encoding, which is well-defined regardless of the FPU.
+//
+inline uint16_t fp80_abs_wrap(fp80_t const &a, fp80_t &dst) { dst = fp80_t::abs(a); return 0; }
+inline uint16_t fp80_chs_wrap(fp80_t const &a, fp80_t &dst) { dst = fp80_t::chs(a); return 0; }
+
+//
+// floor() and ceil() are defined as round-to-int with rounding mode Down
+// and Up respectively. The asm side uses frndint with an appropriately
+// preconfigured control word.
+//
+inline uint16_t fp80_floor_wrap(fp80_t const &a, fp80_t &dst) { dst = fp80_t::floor(a); return 0; }
+inline uint16_t fp80_ceil_wrap (fp80_t const &a, fp80_t &dst) { dst = fp80_t::ceil(a);  return 0; }
+
+void test_copysign80()
+{
+    errors_t errs("copysign(80)", 0);
+    // Sample sparsely; copysign is purely bit ops so we don't need full N^2.
+    for (int i = 0; i < int(values80.size()); i += 11)
+    {
+        fp80_t const &a = values80[i];
+        for (int j = 0; j < int(values80.size()); j += 11)
+        {
+            fp80_t const &b = values80[j];
+
+            // Oracle: |a| with b's sign bit. Reconstruct from raw fields so
+            // we don't rely on the very function under test.
+            fp80_t expected(a.mantissa(),
+                            (a.sign_exp() & ~FP80_SIGN_MASK) | (b.sign_exp() & FP80_SIGN_MASK));
+
+            fp80_t ours = a;
+            ours.copysign(b);
+
+            errs.check_value(ours, expected, 0, 0,
+                [&]() { print("copysign({:04X}:{:016X}, {:04X}:{:016X})",
+                    a.sign_exp(), a.mantissa(),
+                    b.sign_exp(), b.mantissa()); },
+                [&]() {});
+        }
+    }
+    errs.print_report("copysign(80)");
+}
+
+void test_samesign80()
+{
+    errors_t errs("samesign(80)", 0);
+    for (int i = 0; i < int(values80.size()); i += 11)
+    {
+        fp80_t const &a = values80[i];
+        for (int j = 0; j < int(values80.size()); j += 11)
+        {
+            fp80_t const &b = values80[j];
+            bool expected = ((a.sign_exp() ^ b.sign_exp()) & FP80_SIGN_MASK) == 0;
+            bool ours = fp80_t::samesign(a, b);
+            errs.count++;
+            if (ours != expected)
+            {
+                errs.experrors++;
+                if (errs.printed++ < MAX_PRINT_ERRORS)
+                    print("samesign({:04X}:{:016X}, {:04X}:{:016X}) = {} (expected {})\n",
+                        a.sign_exp(), a.mantissa(),
+                        b.sign_exp(), b.mantissa(),
+                        ours ? "true" : "false",
+                        expected ? "true" : "false");
+            }
+            else
+                errs.matches++;
+        }
+    }
+    errs.print_report("samesign(80)");
+}
+
+void test_make_qnan80()
+{
+    errors_t errs("make_qnan(80)", 0);
+    for (int i = 0; i < int(values80.size()); i++)
+    {
+        fp80_t const &v = values80[i];
+        if (!v.isnan()) continue;  // make_qnan precondition: input must be a NaN
+        fp80_t q = fp80_t::make_qnan(v);
+        errs.count++;
+        // Spec for fp80_t::make_qnan: keep all other bits, force the "quiet"
+        // bit (mantissa MSB below the explicit 1) on.
+        if (!q.isqnan()) {
+            errs.experrors++;
+            if (errs.printed++ < MAX_PRINT_ERRORS)
+                print("make_qnan({:04X}:{:016X}) = {:04X}:{:016X} (not qnan)\n",
+                    v.sign_exp(), v.mantissa(), q.sign_exp(), q.mantissa());
+            continue;
+        }
+        // Bits other than the quiet bit should be preserved.
+        uint64_t expected_man = v.mantissa() | 0xc000000000000000ull;
+        if (q.mantissa() != expected_man || q.sign_exp() != v.sign_exp())
+        {
+            errs.experrors++;
+            if (errs.printed++ < MAX_PRINT_ERRORS)
+                print("make_qnan({:04X}:{:016X}) = {:04X}:{:016X} (expected {:04X}:{:016X})\n",
+                    v.sign_exp(), v.mantissa(),
+                    q.sign_exp(), q.mantissa(),
+                    v.sign_exp(), expected_man);
+        }
+        else
+            errs.matches++;
+    }
+    errs.print_report("make_qnan(80)");
+}
+
+//
+// Test an SW-only fp80 op (FXAM-style — no result value, only flags). For
+// each value in values80 the C++ implementation's returned SW is compared
+// directly against what the real CPU's FPU produces.
+//
+template<typename FpFuncType, typename X87FuncType>
+void test_classify80(FpFuncType fpfunc, X87FuncType x87func, char const *name)
+{
+    errors_t errs(name, 0);
+    for (int i = 0; i < int(values80.size()); i++)
+    {
+        fp80_t const &v = values80[i];
+        uint16_t x87sw = x87func(&v) & ~X87SW_TOP_MASK;
+        uint16_t oursw = fpfunc(v) & ~X87SW_TOP_MASK;
+        errs.count++;
+        if (oursw != x87sw)
+        {
+            errs.swerrors++;
+            if (errs.printed++ < MAX_PRINT_ERRORS)
+                print("{}({:04X}:{:016X}) sw = {:04X} (should be {:04X})",
+                    name, v.sign_exp(), v.mantissa(), oursw, x87sw);
+        }
+        else
+            errs.matches++;
+    }
+    errs.print_report(name);
+}
+
+//
+// Test an SW-returning binary compare op (fcom/fucom/fcomi/fucomi). Like
+// test_classify80 but takes two operands. Strides through the value table
+// to keep the run time bounded.
+//
+template<typename FpFuncType, typename X87FuncType>
+void test_compare_sw80(FpFuncType fpfunc, X87FuncType x87func, char const *name, int stride = 7)
+{
+    errors_t errs(name, 0);
+    for (int i = 0; i < int(values80.size()); i += stride)
+    {
+        fp80_t const &a = values80[i];
+        for (int j = 0; j < int(values80.size()); j += stride)
+        {
+            fp80_t const &b = values80[j];
+            uint16_t x87sw = x87func(&a, &b) & ~X87SW_TOP_MASK;
+            uint16_t oursw = fpfunc(a, b) & ~X87SW_TOP_MASK;
+            errs.count++;
+            if (oursw != x87sw)
+            {
+                errs.swerrors++;
+                if (errs.printed++ < MAX_PRINT_ERRORS)
+                    print("{}({:04X}:{:016X}, {:04X}:{:016X}) sw = {:04X} (should be {:04X})",
+                        name,
+                        a.sign_exp(), a.mantissa(),
+                        b.sign_exp(), b.mantissa(),
+                        oursw, x87sw);
+            }
+            else
+                errs.matches++;
+        }
+    }
+    errs.print_report(name);
+}
+
+//
+// Compare two fp80 status words for the cmp(80) test. Currently fp80_t has
+// no x87_fcom that returns a SW, so this validates the *test harness's* model
+// (test_compare80 derives booleans from C0/C2/C3 — verify those are the only
+// bits fucompp produces from the FPU on these inputs).
+//
+// Specifically: fucompp's only meaningful output bits beyond TOP and ES are
+// C0, C2, C3 (and C1=0 unless stack fault, which can't happen since we
+// always reinit). Anything else in the low SW bits would indicate an issue
+// in the asm bridge.
+//
+void test_fcmp_sw_shape()
+{
+    errors_t errs("cmp_sw_shape(80)", 0);
+    // Bits we DON'T expect fucompp to set: precision/underflow/overflow/divzero;
+    // and we do NOT expect C1 since we always reinit before each call.
+    // (Note: fucompp legitimately sets DE on denormal operands and IE on SNaN
+    // inputs, so those are excluded from FORBIDDEN.)
+    uint16_t const FORBIDDEN =
+        X87SW_PRECISION_EX | X87SW_UNDERFLOW_EX | X87SW_OVERFLOW_EX |
+        X87SW_DIVZERO_EX   | X87SW_C1;
+    for (int i = 0; i < int(values80.size()); i += 7)
+    {
+        for (int j = 0; j < int(values80.size()); j += 7)
+        {
+            uint16_t sw = fcmp80(&values80[i], &values80[j]) & ~X87SW_TOP_MASK;
+            errs.count++;
+            // FUCOMPP sets #IA only when an operand is an SNaN (QNaNs are
+            // "unordered" without raising IE). Skip IE checks: they're
+            // expected for SNaN inputs.
+            uint16_t leak = sw & FORBIDDEN;
+            if (leak != 0)
+            {
+                errs.experrors++;
+                if (errs.printed++ < MAX_PRINT_ERRORS)
+                    print("cmp_sw_shape({:04X}:{:016X}, {:04X}:{:016X}) sw={:04X} (unexpected bits: {:04X})\n",
+                        values80[i].sign_exp(), values80[i].mantissa(),
+                        values80[j].sign_exp(), values80[j].mantissa(),
+                        sw, leak);
+            }
+            else
+                errs.matches++;
+        }
+    }
+    errs.print_report("cmp_sw_shape(80)");
+}
+
+//
+// Test the six fp80 comparison operators against fucompp from the real FPU.
+//
+// The FPU encodes the comparison result in C3:C2:C0:
+//    a > b      -> 0:0:0
+//    a < b      -> 0:0:1
+//    a == b     -> 1:0:0
+//    unordered  -> 1:1:1   (either operand is NaN)
+//
+void test_compare80()
+{
+    errors_t errs("cmp(80)", 0);
+    // O(N^2) over values80 is too expensive at the full set; stride to keep
+    // the count tractable while still hitting every kind of value.
+    int const stride = 7;
+    for (int i = 0; i < int(values80.size()); i += stride)
+    {
+        fp80_t const &a = values80[i];
+        for (int j = 0; j < int(values80.size()); j += stride)
+        {
+            fp80_t const &b = values80[j];
+
+            uint16_t sw = fcmp80(&a, &b);
+            bool x87_gt = (sw & (X87SW_C3 | X87SW_C2 | X87SW_C0)) == 0;
+            bool x87_lt = (sw & (X87SW_C3 | X87SW_C2 | X87SW_C0)) == X87SW_C0;
+            bool x87_eq = (sw & (X87SW_C3 | X87SW_C2 | X87SW_C0)) == X87SW_C3;
+            bool x87_unord = (sw & X87SW_C2) != 0;
+
+            // Derived expected boolean for each C++ operator. Standard
+            // IEEE comparison semantics: every ordered relation is false
+            // when either operand is NaN; != is the lone exception.
+            struct { char const *name; bool ours; bool expected; } cases[6] = {
+                { "==", a == b, x87_eq                          },
+                { "!=", a != b, !x87_eq                         },
+                { "<",  a <  b, x87_lt && !x87_unord            },
+                { "<=", a <= b, (x87_lt || x87_eq) && !x87_unord},
+                { ">",  a >  b, x87_gt && !x87_unord            },
+                { ">=", a >= b, (x87_gt || x87_eq) && !x87_unord},
+            };
+
+            for (auto const &c : cases)
+            {
+                if (c.ours != c.expected)
+                {
+                    errs.experrors++;
+                    if (errs.printed++ < MAX_PRINT_ERRORS)
+                        print("cmp({:04X}:{:016X}, {:04X}:{:016X}) {} = {} (should be {})\n",
+                            a.sign_exp(), a.mantissa(),
+                            b.sign_exp(), b.mantissa(),
+                            c.name,
+                            c.ours ? "true" : "false",
+                            c.expected ? "true" : "false");
+                }
+                else
+                    errs.matches++;
+                errs.count++;
+            }
+        }
+    }
+    errs.print_report("cmp(80)");
 }
 
 //
@@ -1002,9 +1536,7 @@ int main(int argc, char *argv[])
 {
     int errors = 0;
 
-    LARGE_INTEGER freq;
-    QueryPerformanceFrequency(&freq);
-    min_timing_ticks = freq.QuadPart / 2;
+    min_timing_duration = std::chrono::milliseconds(500);
 
     uint16_t cw = 0xf3f;
     x87setcw(&cw);
@@ -1200,7 +1732,89 @@ int main(int argc, char *argv[])
     cw = X87CW_MASK_ALL_EX | X87CW_ROUNDING_NEAREST | X87CW_PRECISION_EXTENDED;
     x87setcw(&cw);
 
-//    test_unary80(&fp80_t::x87_f2xm1, &f2xm180, "f2xm1(80)");
+    // Built-in constants vs. the real FPU (all 13 constants)
+    test_consts80();
+
+    // FXAM-driven classification: isnan/isinf/iszero/isdenorm/isnormal/
+    // ispinf/isninf/isqnan/issnan/sign
+    test_predicates80();
+
+    // Sign manipulation: abs, chs, copysign, samesign, make_qnan
+    test_unary80(&fp80_abs_wrap, &fabs80, "fabs(80)", 1);
+    test_unary80(&fp80_chs_wrap, &fchs80, "fchs(80)", 1);
+    test_copysign80();
+    test_samesign80();
+    test_make_qnan80();
+
+    // Comparison operators (==, !=, <, <=, >, >=) against fucompp
+    test_compare80();
+    // Verify nothing leaks into the fucompp status word besides C0/C2/C3
+    test_fcmp_sw_shape();
+
+    // SW-returning classification and compare entry points: validate that
+    // C++ x87_fxam / x87_ftst / x87_fcom / x87_fucom / x87_fcomi / x87_fucomi
+    // each produce exactly the SW the live FPU does. (Currently all stubs.)
+    test_classify80(&fp80_t::x87_fxam, &fxam80, "x87_fxam(80)");
+    test_classify80(&fp80_t::x87_ftst, &ftst80, "x87_ftst(80)");
+    test_compare_sw80(&fp80_t::x87_fcom,   &fcom80,   "x87_fcom(80)");
+    test_compare_sw80(&fp80_t::x87_fucom,  &fcmp80,   "x87_fucom(80)");
+    test_compare_sw80(&fp80_t::x87_fcomi,  &fcomi80,  "x87_fcomi(80)");
+    test_compare_sw80(&fp80_t::x87_fucomi, &fucomi80, "x87_fucomi(80)");
+
+    // 80-bit arithmetic: sweep across all 4 rounding modes x 3 precision
+    // modes, because per the spec (Table 8-2) PC affects FADD/FSUB/FMUL/FDIV
+    // (+ reverse variants) and FSQRT. All other transcendentals use full
+    // 80-bit internally and are unaffected by PC, so we run them at default
+    // CW only.
+    //
+    // These tests use the SW-returning entry points (x87_fadd etc.) so
+    // C1=roundup and the precision/underflow/overflow/invalid exception
+    // bits are validated against the real FPU rather than ignored.
+    for (uint32_t prec = 0; prec < s_precision.size(); prec++)
+        for (uint32_t round = 0; round < s_round.size(); round++)
+        {
+            cw = X87CW_MASK_ALL_EX | s_precision[prec] | s_round[round];
+            x87setcw(&cw);
+            print("80-bit arithmetic: precision {} round {}\n", prec, round);
+            test_binary80(&fp80_t::x87_fadd,  &fadd80,  "fadd(80)",  1);
+            test_binary80(&fp80_t::x87_fsub,  &fsub80,  "fsub(80)",  1);
+            test_binary80(&fp80_t::x87_fsubr, &fsubr80, "fsubr(80)", 1);
+            test_binary80(&fp80_t::x87_fmul,  &fmul80,  "fmul(80)",  1);
+            test_binary80(&fp80_t::x87_fdiv,  &fdiv80,  "fdiv(80)",  1);
+            test_binary80(&fp80_t::x87_fdivr, &fdivr80, "fdivr(80)", 1);
+            test_unary80 (&fp80_t::x87_fsqrt, &fsqrt80, "fsqrt(80)", 1);
+        }
+
+    // Back to default CW (round-to-nearest, extended precision) for the
+    // remaining tests.
+    cw = X87CW_MASK_ALL_EX | X87CW_ROUNDING_NEAREST | X87CW_PRECISION_EXTENDED;
+    x87setcw(&cw);
+
+    // floor/ceil are defined as frndint with rounding mode Down/Up respectively.
+    cw = X87CW_MASK_ALL_EX | X87CW_ROUNDING_DOWN | X87CW_PRECISION_EXTENDED;
+    x87setcw(&cw);
+    test_unary80(&fp80_floor_wrap, &frndint80, "floor(80)", 1);
+    cw = X87CW_MASK_ALL_EX | X87CW_ROUNDING_UP | X87CW_PRECISION_EXTENDED;
+    x87setcw(&cw);
+    test_unary80(&fp80_ceil_wrap, &frndint80, "ceil(80)", 1);
+    cw = X87CW_MASK_ALL_EX | X87CW_ROUNDING_NEAREST | X87CW_PRECISION_EXTENDED;
+    x87setcw(&cw);
+
+    // 80-bit transcendentals (PC has no effect — single mode is sufficient)
+    test_unary80_2(&fp80_t::x87_fxtract, &fxtract80, "fxtract(80)", 1);
+    test_unary80(&fp80_t::x87_f2xm1, &f2xm180, "f2xm1(80)", 2);
+    test_unary80(&fp80_t::x87_fsin, &fsin80, "fsin(80)", 3);
+    test_unary80(&fp80_t::x87_fcos, &fcos80, "fcos(80)", 3);
+    test_unary80_2(&fp80_t::x87_fsincos, &fsincos80, "fsincos(80)", 3);
+    test_unary80_2(&fp80_t::x87_fptan, &fptan80, "fptan(80)", 3);
+    test_unary80(&fp80_t::x87_frndint, &frndint80, "frndint(80)", 1);
+
+    test_binary80(&fp80_t::x87_fscale, &fscale80, "fscale(80)", 1);
+    test_binary80(&fp80_t::x87_fprem, &fprem80, "fprem(80)", 1);
+    test_binary80(&fp80_t::x87_fprem1, &fprem180, "fprem1(80)", 1);
+    test_binary80(&fp80_t::x87_fyl2xp1, &fyl2xp180, "fyl2xp1(80)", 3);
+    test_binary80(&fp80_t::x87_fyl2x, &fyl2x80, "fyl2x(80)", 2);
+    test_binary80(&fp80_t::x87_fpatan, &fpatan80, "fpatan(80)", 3);
 
     return 0;
 }

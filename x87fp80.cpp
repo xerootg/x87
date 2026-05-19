@@ -462,4 +462,38 @@ template void fp80_t::x87_fist_common<int64_t>(x87cw_t cw, x87sw_t &sw, void *ds
 template void fp80_t::x87_fist_common<int32_t>(x87cw_t cw, x87sw_t &sw, void *dst, fp80_t const &src);
 template void fp80_t::x87_fist_common<int16_t>(x87cw_t cw, x87sw_t &sw, void *dst, fp80_t const &src);
 
+
+//===========================================================================
+//
+// STUBS for unimplemented 80-bit arithmetic.
+//
+// These return the FPU "indefinite" value so the test harness can link and
+// report 100% failure for whichever operation is still missing.
+//
+//===========================================================================
+
+fp80_t operator+(fp80_t const &, fp80_t const &) { return fp80_t::const_indef(); }
+fp80_t operator-(fp80_t const &, fp80_t const &) { return fp80_t::const_indef(); }
+fp80_t operator*(fp80_t const &, fp80_t const &) { return fp80_t::const_indef(); }
+fp80_t operator/(fp80_t const &, fp80_t const &) { return fp80_t::const_indef(); }
+
+fp80_t fp80_t::sqrt(fp80_t const &)  { return fp80_t::const_indef(); }
+fp80_t fp80_t::floor(fp80_t const &) { return fp80_t::const_indef(); }
+fp80_t fp80_t::ceil(fp80_t const &)  { return fp80_t::const_indef(); }
+
+fp80_t fp80_t::ldexp(fp80_t const &, int32_t) { return fp80_t::const_indef(); }
+
+bool fp80_t::operator< (fp80_t const &) const { return false; }
+bool fp80_t::operator<=(fp80_t const &) const { return false; }
+bool fp80_t::operator> (fp80_t const &) const { return false; }
+bool fp80_t::operator>=(fp80_t const &) const { return false; }
+
+uint16_t fp80_t::x87_fadd (fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
+uint16_t fp80_t::x87_fsub (fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
+uint16_t fp80_t::x87_fsubr(fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
+uint16_t fp80_t::x87_fmul (fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
+uint16_t fp80_t::x87_fdiv (fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
+uint16_t fp80_t::x87_fdivr(fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
+uint16_t fp80_t::x87_fsqrt(fp80_t const &, fp80_t &dst)                 { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
+
 }
