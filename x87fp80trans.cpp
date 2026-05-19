@@ -125,6 +125,10 @@
 namespace x87
 {
 
+// From x87fp80.cpp — properly rounded fpext96_t -> fp80 conversion + CW reader.
+extern fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &out_sw);
+extern x87cw_t read_x87_cw();
+
 //
 // Debug helpers for printing out intermediate values
 //
@@ -463,10 +467,6 @@ extern uint16_t host_x87_unary2      (fp80_t const &src, fp80_t &dst1, fp80_t &d
 extern uint16_t host_x87_binary_trans(fp80_t const &a,   fp80_t const &b, fp80_t &dst, int op);
 #endif
 
-// From x87fp80.cpp — properly rounded fpext96_t -> fp80 conversion.
-extern fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &out_sw);
-extern x87cw_t read_x87_cw();
-
 uint16_t fp80_t::x87_fxtract(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
 {
     if (src.isnan())
@@ -626,9 +626,257 @@ static uint16_t via_fp64_unary2(fp80_t const &a, fp80_t &dst1, fp80_t &dst2,
     return sw;
 }
 
+//
+// Polynomial evaluators (Horner) — adapted from x87fp64trans.cpp but
+// templated so we can use them with fpext96_t directly.
+//
+template<typename FpType, size_t Count>
+static FpType poly_eval80(FpType const &x, std::array<FpType, Count> const &terms)
+{
+    FpType dst = terms[0];
+    for (size_t i = 1; i < Count; i++)
+        dst = dst * x + terms[i];
+    return dst;
+}
+
+template<typename FpType, size_t Count>
+static FpType poly1_eval80(FpType const &x, std::array<FpType, Count> const &terms)
+{
+    FpType dst = x + terms[0];
+    for (size_t i = 1; i < Count; i++)
+        dst = dst * x + terms[i];
+    return dst;
+}
+
+//
+// Hand-rolled fpatan using fpext96_t intermediates and Cephes-style
+// long-double polynomial coefficients (atanl from Cephes).
+//
+// fpatan(src1, src2) computes atan2(src2, src1). Asm convention puts
+// ARG1 (the divisor) into ST(0) and ARG2 (the dividend) into ST(1);
+// FPATAN computes ST(1)/ST(0)-shaped atan and replaces ST(1).
+//
+uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
+{
+    using fpext_t = fpext96_t;
+
+    uint16_t flags = 0;
+    if (src1.isdenorm() || src2.isdenorm()) flags |= X87SW_DENORM_EX;
+
+    // Constants needed for the special-case branches.
+    static fpext_t const pi80(0xc90fdaa22168c235ull, 0x00000000, 1, 0);
+    static fpext_t const npi80(0xc90fdaa22168c235ull, 0x00000000, 1, 1);
+    static fpext_t const pio2_80(0xc90fdaa22168c235ull, 0x00000000, 0, 0);
+    static fpext_t const npio2_80(0xc90fdaa22168c235ull, 0x00000000, 0, 1);
+    static fpext_t const pio4_80(0xc90fdaa22168c235ull, 0x00000000, -1, 0);
+    static fpext_t const npio4_80(0xc90fdaa22168c235ull, 0x00000000, -1, 1);
+    static fpext_t const pi3o4_80(0x96cbe3f9990e91a8ull, 0x00000000, 1, 0);
+    static fpext_t const npi3o4_80(0x96cbe3f9990e91a8ull, 0x00000000, 1, 1);
+
+    // Special cases: NaN propagation, infinities, zeros.
+    if (src1.isnan() || src2.isnan())
+    {
+        bool snan = src1.issnan() || src2.issnan();
+        if (src1.isnan()) dst = src1.issnan() ? fp80_t::make_qnan(src1) : src1;
+        else              dst = src2.issnan() ? fp80_t::make_qnan(src2) : src2;
+        return snan ? X87SW_INVALID_EX : 0;
+    }
+    if (src1.ismaxexp())  // src1 = ±inf
+    {
+        if (src2.isinf())
+        {
+            // atan2(±inf, ±inf) -> ±pi/4 or ±3pi/4
+            fpext_t r = (src1.sign() == 0) ? (src2.sign() ? npio4_80 : pio4_80)
+                                           : (src2.sign() ? npi3o4_80 : pi3o4_80);
+            dst = round_fpext96_to_fp80(r, read_x87_cw(), flags);
+            return flags | X87SW_PRECISION_EX;
+        }
+        // atan2(finite, ±inf): 0 if +inf, ±pi if -inf
+        if (src1.sign() == 0)
+        {
+            dst = src2.sign() ? fp80_t::const_nzero() : fp80_t::const_zero();
+        }
+        else
+        {
+            dst = round_fpext96_to_fp80(src2.sign() ? npi80 : pi80, read_x87_cw(), flags);
+            flags |= X87SW_PRECISION_EX;
+        }
+        return flags;
+    }
+    if (src2.ismaxexp())   // src2 = ±inf (and src1 finite)
+    {
+        // atan2(±inf, finite) -> ±pi/2
+        dst = round_fpext96_to_fp80(src2.sign() ? npio2_80 : pio2_80, read_x87_cw(), flags);
+        return flags | X87SW_PRECISION_EX;
+    }
+    if (src1.iszero())
+    {
+        if (src2.iszero())
+        {
+            // atan2(±0, ±0) -> 0 if x≥0, ±pi if x<0
+            if (src1.sign() == 0)
+            {
+                dst = src2.sign() ? fp80_t::const_nzero() : fp80_t::const_zero();
+                return flags;
+            }
+            dst = round_fpext96_to_fp80(src2.sign() ? npi80 : pi80, read_x87_cw(), flags);
+            return flags | X87SW_PRECISION_EX;
+        }
+        // atan2(±finite!=0, ±0) -> ±pi/2
+        dst = round_fpext96_to_fp80(src2.sign() ? npio2_80 : pio2_80, read_x87_cw(), flags);
+        return flags | X87SW_PRECISION_EX;
+    }
+    if (src2.iszero())
+    {
+        // atan2(0, x) for x≠0: +0 if x>0, ±pi if x<0
+        if (src1.sign() == 0)
+        {
+            dst = src2.sign() ? fp80_t::const_nzero() : fp80_t::const_zero();
+            return flags;
+        }
+        dst = round_fpext96_to_fp80(src2.sign() ? npi80 : pi80, read_x87_cw(), flags);
+        return flags | X87SW_PRECISION_EX;
+    }
+
+    // Cephes long-double polynomial (fp80-precision coefficients).
+    static std::array<fpext_t, 5> const P =
+    {
+        fpext_t(0xab592c6f0312517aull, 0x00000000, 5, 1),
+        fpext_t(0xacb8ff96e38fc5ecull, 0x00000000, 6, 1),
+        fpext_t(0xe48acd38ac80eeb7ull, 0x00000000, 5, 1),
+        fpext_t(0xdb6cc72849c9b699ull, 0x00000000, 3, 1),
+        fpext_t(0xdd2366bb59c287a9ull, 0x00000000, -1, 1),
+    };
+    static std::array<fpext_t, 5> const Q =
+    {
+        fpext_t(0x9370afdae1699f0bull, 0x00000000, 7, 0),
+        fpext_t(0xbe705cf6fe4c98a0ull, 0x00000000, 8, 0),
+        fpext_t(0xa9d8280ce860064bull, 0x00000000, 8, 0),
+        fpext_t(0xf62a6f2dea7a25d3ull, 0x00000000, 6, 0),
+        fpext_t(0xee2df34eaba2b74aull, 0x00000000, 3, 0),
+    };
+    static fpext_t const T3P8(0x9a827999fcef3242ull, 0x00000000, 1, 0);
+    static fpext_t const TP8 (0xd413cccfe7799211ull, 0x00000000, -2, 0);
+
+    // x = |src2 / src1| (fp80 division for full precision).
+    fp80_t x_fp80;
+    fp80_t::x87_fdivr(src1, src2, x_fp80);   // x_fp80 = src2 / src1
+    bool inner_sign = (x_fp80.sign() != 0);
+    if (inner_sign) x_fp80 = fp80_t::chs(x_fp80);
+
+    fpext_t yext, xext;
+
+    if (x_fp80.isinf())
+    {
+        // |src2|/|src1| overflowed: result is ±π/2 with no correction.
+        yext = pio2_80;
+        xext = fpext_t::zero;
+    }
+    else if (x_fp80.iszero())
+    {
+        yext = fpext_t::zero;
+        xext = fpext_t::zero;
+    }
+    else
+    {
+        fpext_t x(x_fp80);
+        auto fpext_gt = [](fpext_t const &a, fpext_t const &b) {
+            if (a.exponent() != b.exponent()) return a.exponent() > b.exponent();
+            if (a.mantissa() != b.mantissa()) return a.mantissa() > b.mantissa();
+            return a.extend() > b.extend();
+        };
+        bool x_gt_t3p8 = fpext_gt(x, T3P8);
+        bool x_gt_tp8  = fpext_gt(x, TP8);
+        bool skip_poly = false;
+        if (x_gt_t3p8)
+        {
+            yext = pio2_80;
+            fp80_t one = fp80_t::const_one();
+            fp80_t recip;
+            fp80_t::x87_fdivr(x_fp80, one, recip);
+            // Defensive: if recip became special (huge x → tiny but possibly
+            // 0, or numerical edge), skip polynomial correction.
+            if (recip.isnan() || recip.isinf() || recip.iszero())
+            {
+                xext = fpext_t::zero;
+                skip_poly = true;
+            }
+            else
+            {
+                fpext_t r(recip);
+                r.chs();
+                xext = r;
+            }
+        }
+        else if (x_gt_tp8)
+        {
+            yext = pio4_80;
+            fp80_t one = fp80_t::const_one();
+            fp80_t num, denom, ratio;
+            fp80_t::x87_fsubr(x_fp80, one, num);
+            fp80_t::x87_fadd (x_fp80, one, denom);
+            fp80_t::x87_fdivr(denom, num, ratio);
+            if (ratio.isnan() || ratio.isinf())
+            {
+                xext = fpext_t::zero;
+                skip_poly = true;
+            }
+            else if (ratio.iszero())
+            {
+                xext = fpext_t::zero;
+                skip_poly = true;
+            }
+            else
+            {
+                xext = fpext_t(ratio);
+            }
+        }
+        else
+        {
+            yext = fpext_t::zero;
+            xext = x;
+        }
+
+        if (!skip_poly)
+        {
+            fpext_t z = xext * xext;
+            fpext_t numer = poly_eval80(z, P);
+            fpext_t denom = poly1_eval80(z, Q);
+            // div64 routes through fp64; guard against fp64 overflow.
+            fp64_t numer_64 = numer.as_fp64();
+            fp64_t denom_64 = denom.as_fp64();
+            if (!numer_64.isinf() && !numer_64.isnan() &&
+                !denom_64.isinf() && !denom_64.isnan() && !denom_64.iszero())
+            {
+                fpext_t poly_part = numer.div64(denom) * z * xext;
+                yext = yext + poly_part + xext;
+            }
+            else
+            {
+                yext = yext + xext;     // best-effort
+            }
+        }
+    }
+
+    if (inner_sign) yext.chs();
+
+    // Apply quadrant offset.
+    int code = (src1.sign() << 1) | src2.sign();
+    if (code == 2) yext = yext + pi80;
+    else if (code == 3) yext = yext + npi80;
+
+    dst = round_fpext96_to_fp80(yext, read_x87_cw(), flags);
+    flags |= X87SW_PRECISION_EX;
+
+    // For sign of zero: if src2 is negative, result of zero gets a minus.
+    if (dst.iszero() && src2.sign())
+        dst = fp80_t::chs(dst);
+
+    return flags;
+}
+
 uint16_t fp80_t::x87_fyl2x  (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fyl2x);   }
 uint16_t fp80_t::x87_fyl2xp1(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fyl2xp1); }
-uint16_t fp80_t::x87_fpatan (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fpatan);  }
 uint16_t fp80_t::x87_fsin   (fp80_t const &a, fp80_t &dst)                  { return via_fp64_unary(a, dst, &fp64_t::x87_fsin); }
 uint16_t fp80_t::x87_fcos   (fp80_t const &a, fp80_t &dst)                  { return via_fp64_unary(a, dst, &fp64_t::x87_fcos); }
 uint16_t fp80_t::x87_fsincos(fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return via_fp64_unary2(a, d1, d2, &fp64_t::x87_fsincos); }
