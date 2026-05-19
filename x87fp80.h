@@ -95,14 +95,14 @@ public:
     fp80_t &operator/=(fp80_t const &rhs);
 
     //
-    // comparison operations
+    // comparison operations (IEEE 754 semantics: NaN is unordered, ±0 are equal)
     //
-    inline bool operator==(fp80_t const &rhs) const { return (this->sign_exp() == rhs.sign_exp() && this->mantissa() == rhs.mantissa()); }
-    inline bool operator!=(fp80_t const &rhs) const { return (this->sign_exp() != rhs.sign_exp() || this->mantissa() != rhs.mantissa()); }
-    bool operator< (fp80_t const &rhs) const;   // STUB: not yet implemented
-    bool operator<=(fp80_t const &rhs) const;   // STUB: not yet implemented
-    bool operator> (fp80_t const &rhs) const;   // STUB: not yet implemented
-    bool operator>=(fp80_t const &rhs) const;   // STUB: not yet implemented
+    bool operator==(fp80_t const &rhs) const;
+    bool operator!=(fp80_t const &rhs) const;
+    bool operator< (fp80_t const &rhs) const;
+    bool operator<=(fp80_t const &rhs) const;
+    bool operator> (fp80_t const &rhs) const;
+    bool operator>=(fp80_t const &rhs) const;
 
     //
     // pieces

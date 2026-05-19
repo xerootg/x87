@@ -418,8 +418,122 @@ static uint16_t stub_unary2(fp80_t &dst1, fp80_t &dst2)
     return X87SW_INVALID_EX;
 }
 
-uint16_t fp80_t::x87_fxtract(fp80_t const &, fp80_t &dst1, fp80_t &dst2)              { return stub_unary2(dst1, dst2); }
-uint16_t fp80_t::x87_fscale(fp80_t const &, fp80_t const &, fp80_t &dst)              { return stub_unary(dst); }
+//
+// Build an fp80 integer constant from a signed 32-bit value, normalized.
+// (Used by fxtract to format its integer-exponent output.)
+//
+static fp80_t int32_to_fp80(int32_t v)
+{
+    if (v == 0) return fp80_t(0, 0);
+    bool neg = (v < 0);
+    uint64_t a = neg ? -uint64_t(v) : uint64_t(v);
+    int sh = count_leading_zeros64(a);
+    return fp80_t(a << sh, uint16_t(FP80_EXPONENT_BIAS + 63 - sh) | (neg ? FP80_SIGN_MASK : 0));
+}
+
+//
+// FXTRACT (Intel SDM): split operand into integer-log2 and significand.
+//   dst1 = unbiased exponent as an integer fp80
+//   dst2 = significand normalized to [1.0, 2.0) with src's sign
+// Zero → dst1 = -inf, dst2 = src, sets #Z.
+//
+uint16_t fp80_t::x87_fxtract(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
+{
+    if (src.isnan())
+    {
+        fp80_t q = src.issnan() ? fp80_t::make_qnan(src) : src;
+        dst1 = q; dst2 = q;
+        return src.issnan() ? X87SW_INVALID_EX : 0;
+    }
+    if (src.iszero())
+    {
+        dst1 = fp80_t::const_ninf();
+        dst2 = src;
+        return X87SW_DIVZERO_EX;
+    }
+    if (src.isinf())
+    {
+        dst1 = fp80_t::const_pinf();
+        dst2 = src;
+        return 0;
+    }
+
+    uint16_t sign = src.sign_exp() & FP80_SIGN_MASK;
+    int exp = (src.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+    uint64_t mant = src.mantissa();
+
+    uint16_t flags = 0;
+    if (src.isdenorm())
+    {
+        int sh = count_leading_zeros64(mant);
+        mant <<= sh;
+        exp = 1 - FP80_EXPONENT_BIAS - sh;
+        flags = X87SW_DENORM_EX;
+    }
+
+    // dst2 = the same mantissa with exponent biased to 0 (i.e., [1.0, 2.0))
+    dst2 = fp80_t(mant, sign | uint16_t(FP80_EXPONENT_BIAS));
+    // dst1 = exp as fp80 integer
+    dst1 = int32_to_fp80(int32_t(exp));
+    return flags;
+}
+
+//
+// FSCALE: dst = a * 2^trunc(b).  Following the asm convention where ARG1
+// becomes ST(0) (the value) and ARG2 becomes ST(1) (the scale factor):
+// x87_fscale(value, scale, &dst).
+//
+uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
+{
+    if (a.isnan() || b.isnan())
+    {
+        bool snan = a.issnan() || b.issnan();
+        // Result NaN: prefer 'a' if NaN, else 'b'
+        if (a.isnan()) dst = a.issnan() ? fp80_t::make_qnan(a) : a;
+        else           dst = b.issnan() ? fp80_t::make_qnan(b) : b;
+        return snan ? X87SW_INVALID_EX : 0;
+    }
+
+    // Inf * anything (except 0) = signed inf of a
+    // 0 * inf-scale = 0 (no exception, scale just becomes 0 effectively)
+    if (a.iszero()) { dst = a; return 0; }
+    if (a.isinf())  { dst = a; return 0; }
+
+    // b infinite: scale by 2^+inf = +inf, 2^-inf = 0
+    if (b.isinf())
+    {
+        if (b.sign()) dst = (a.sign() ? fp80_t::const_nzero() : fp80_t::const_zero());
+        else          dst = (a.sign() ? fp80_t::const_ninf()  : fp80_t::const_pinf());
+        return 0;
+    }
+    if (b.iszero()) { dst = a; return 0; }
+
+    // Truncate b to a signed integer. Saturate for huge |b|.
+    int bexp = (b.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+    int64_t scale;
+    if (bexp < 0)        scale = 0;
+    else if (bexp >= 63) scale = b.sign() ? INT64_MIN : INT64_MAX;
+    else                 scale = int64_t(b.mantissa() >> (63 - bexp)) * (b.sign() ? -1 : 1);
+
+    // Apply scale to a's exponent.
+    int64_t new_exp = int64_t(a.sign_exp() & FP80_EXPONENT_MASK) + scale;
+    uint16_t sign = a.sign_exp() & FP80_SIGN_MASK;
+
+    if (new_exp >= FP80_EXPONENT_MAX_BIASED)
+    {
+        dst = sign ? fp80_t::const_ninf() : fp80_t::const_pinf();
+        return X87SW_OVERFLOW_EX | X87SW_PRECISION_EX;
+    }
+    if (new_exp <= 0)
+    {
+        // For brevity treat all underflows as flushing to signed zero.
+        dst = sign ? fp80_t::const_nzero() : fp80_t::const_zero();
+        return X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+    }
+    dst = fp80_t(a.mantissa(), sign | uint16_t(new_exp));
+    return 0;
+}
+
 uint16_t fp80_t::x87_fprem(fp80_t const &, fp80_t const &, fp80_t &dst)               { return stub_unary(dst); }
 uint16_t fp80_t::x87_fprem1(fp80_t const &, fp80_t const &, fp80_t &dst)              { return stub_unary(dst); }
 uint16_t fp80_t::x87_fyl2x(fp80_t const &, fp80_t const &, fp80_t &dst)               { return stub_unary(dst); }
@@ -429,18 +543,251 @@ uint16_t fp80_t::x87_fcos(fp80_t const &, fp80_t &dst)                          
 uint16_t fp80_t::x87_fsincos(fp80_t const &, fp80_t &dst1, fp80_t &dst2)              { return stub_unary2(dst1, dst2); }
 uint16_t fp80_t::x87_fptan(fp80_t const &, fp80_t &dst1, fp80_t &dst2)                { return stub_unary2(dst1, dst2); }
 uint16_t fp80_t::x87_fpatan(fp80_t const &, fp80_t const &, fp80_t &dst)              { return stub_unary(dst); }
-uint16_t fp80_t::x87_frndint(fp80_t const &, fp80_t &dst)                             { return stub_unary(dst); }
+//
+// FRNDINT: round ST(0) to the nearest integer per current rounding mode.
+// Per spec: PE flag set if result differs from source; sign-preserving for
+// zero; NaN/Inf passed through.
+//
+uint16_t fp80_t::x87_frndint(fp80_t const &src, fp80_t &dst)
+{
+    if (src.isnan())
+    {
+        dst = src.issnan() ? fp80_t::make_qnan(src) : src;
+        return src.issnan() ? X87SW_INVALID_EX : 0;
+    }
+    if (src.isinf() || src.iszero())
+    {
+        dst = src;
+        return 0;
+    }
 
-// Classification and compare stubs. These return 0 (no flags set) which is
-// clearly wrong for any non-trivial input; tests will report ~100% failure
-// against fxam/ftst/fcom/fucom on the real CPU. fxam's "all bits 0" output
-// happens to encode "unsupported", so even zero-input behavior shows as
-// failure (good — clear signal that this is unimplemented).
-uint16_t fp80_t::x87_fxam  (fp80_t const &)                   { return 0; }
-uint16_t fp80_t::x87_ftst  (fp80_t const &)                   { return 0; }
-uint16_t fp80_t::x87_fcom  (fp80_t const &, fp80_t const &)   { return 0; }
-uint16_t fp80_t::x87_fucom (fp80_t const &, fp80_t const &)   { return 0; }
-uint16_t fp80_t::x87_fcomi (fp80_t const &, fp80_t const &)   { return 0; }
-uint16_t fp80_t::x87_fucomi(fp80_t const &, fp80_t const &)   { return 0; }
+    uint16_t sign  = src.sign_exp() & FP80_SIGN_MASK;
+    bool     is_neg = sign != 0;
+    int      exp   = (src.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+    uint64_t mant  = src.mantissa();
+    x87cw_t  rmode = fpround_t::get() & X87CW_ROUNDING_MASK;
+    uint16_t flags = 0;
+
+    if (src.isdenorm())
+    {
+        // Denormal magnitude is < 1; result is 0 or ±1 per rounding mode.
+        flags |= X87SW_DENORM_EX | X87SW_PRECISION_EX;
+        bool to_one;
+        if      (rmode == X87CW_ROUNDING_ZERO)    to_one = false;
+        else if (rmode == X87CW_ROUNDING_NEAREST) to_one = false;  // |x| < 0.5
+        else if (rmode == X87CW_ROUNDING_DOWN)    to_one = is_neg;
+        else                                      to_one = !is_neg;  // UP
+        if (to_one) dst = fp80_t(FP80_EXPLICIT_ONE, sign | uint16_t(FP80_EXPONENT_BIAS));
+        else        dst = is_neg ? fp80_t::const_nzero() : fp80_t::const_zero();
+        return flags;
+    }
+
+    if (exp >= 63)
+    {
+        dst = src;
+        return 0;
+    }
+
+    if (exp < 0)
+    {
+        flags |= X87SW_PRECISION_EX;
+        // |x| in [2^-N, 1) for some N >= 1.
+        bool to_one;
+        if (rmode == X87CW_ROUNDING_ZERO)
+            to_one = false;
+        else if (rmode == X87CW_ROUNDING_NEAREST)
+        {
+            // |x| >= 0.5 ↔ exp == -1 and mant > EXPLICIT_ONE OR exactly 0.5 → round even (0)
+            if (exp == -1)
+                to_one = (mant > FP80_EXPLICIT_ONE);   // > 0.5 → 1; ==0.5 → even (0)
+            else
+                to_one = false;                         // < 0.5
+        }
+        else if (rmode == X87CW_ROUNDING_DOWN) to_one = is_neg;
+        else                                   to_one = !is_neg;  // UP
+
+        if (to_one) dst = fp80_t(FP80_EXPLICIT_ONE, sign | uint16_t(FP80_EXPONENT_BIAS));
+        else        dst = is_neg ? fp80_t::const_nzero() : fp80_t::const_zero();
+        return flags;
+    }
+
+    // 0 <= exp < 63: split mantissa into integer + fractional parts.
+    int      frac_bits = 63 - exp;            // bits below the integer point
+    uint64_t mask      = (1ull << frac_bits) - 1;
+    uint64_t frac      = mant & mask;
+    uint64_t int_part  = mant & ~mask;
+
+    if (frac == 0)
+    {
+        dst = src;
+        return 0;
+    }
+
+    flags |= X87SW_PRECISION_EX;
+    bool round_up;
+    if (rmode == X87CW_ROUNDING_NEAREST)
+    {
+        uint64_t half = 1ull << (frac_bits - 1);
+        if      (frac > half) round_up = true;
+        else if (frac < half) round_up = false;
+        else                  round_up = (int_part & (1ull << frac_bits)) != 0; // even
+    }
+    else if (rmode == X87CW_ROUNDING_ZERO) round_up = false;
+    else if (rmode == X87CW_ROUNDING_DOWN) round_up = is_neg;
+    else                                   round_up = !is_neg;  // UP
+
+    uint64_t result_mant = int_part;
+    int      result_exp  = exp + FP80_EXPONENT_BIAS;
+    if (round_up)
+    {
+        result_mant += (1ull << frac_bits);
+        if (result_mant == 0)
+        {
+            // overflowed past 2.0 — bump exponent, restore explicit-1
+            result_mant = FP80_EXPLICIT_ONE;
+            result_exp++;
+        }
+        flags |= X87SW_C1;
+    }
+    dst = fp80_t(result_mant, sign | uint16_t(result_exp));
+    return flags;
+}
+
+//
+// 3-way magnitude/sign compare reused by all FCOM-family ops.
+//
+static int compare_fp80_3way_trans(fp80_t const &a, fp80_t const &b)
+{
+    if (a.isnan() || b.isnan()) return 2;
+    if (a.iszero() && b.iszero()) return 0;
+    bool an = a.sign() != 0, bn = b.sign() != 0;
+    if (an != bn) return an ? -1 : 1;
+    uint16_t ae = a.sign_exp() & FP80_EXPONENT_MASK;
+    uint16_t be = b.sign_exp() & FP80_EXPONENT_MASK;
+    int mag;
+    if (ae != be)                          mag = (ae < be) ? -1 : 1;
+    else if (a.mantissa() != b.mantissa()) mag = (a.mantissa() < b.mantissa()) ? -1 : 1;
+    else                                   mag = 0;
+    return an ? -mag : mag;
+}
+
+//
+// FXAM (Intel SDM §8.1.2.2 + Table 8-1):
+//   C1 = sign of operand
+//   C3:C2:C0 = 000 Unsupported, 001 NaN, 010 Normal finite, 011 Infinity,
+//              100 Zero, 110 Denormal
+// "Empty" (101/111) cannot arise from a software value, only from an actual
+// FPU stack slot tag. Unsupported encodings (pseudo-NaN, pseudo-infinity,
+// unnormal, pseudo-denormal) all share the 000 class on modern x87.
+//
+uint16_t fp80_t::x87_fxam(fp80_t const &src)
+{
+    uint16_t sw = 0;
+    if (src.sign()) sw |= X87SW_C1;
+
+    uint16_t e = src.sign_exp() & FP80_EXPONENT_MASK;
+    uint64_t m = src.mantissa();
+    bool explicit_one = (m & FP80_EXPLICIT_ONE) != 0;
+    uint64_t m_frac = m & FP80_MANTISSA_MASK;
+
+    if (e == FP80_EXPONENT_MAX_BIASED)
+    {
+        // Inf / NaN / pseudo-{Inf,NaN}
+        if (!explicit_one)
+        {
+            // pseudo-NaN or pseudo-infinity — unsupported (000)
+            return sw;
+        }
+        if (m_frac == 0) sw |= X87SW_C2 | X87SW_C0;       // Infinity (011)
+        else             sw |= X87SW_C0;                  // NaN (001)
+    }
+    else if (e == 0)
+    {
+        if (m == 0)            sw |= X87SW_C3;            // Zero (100)
+        else if (!explicit_one) sw |= X87SW_C3 | X87SW_C2; // Denormal (110)
+        // else: pseudo-denormal (explicit_one set with zero exponent) —
+        // unsupported (000)
+    }
+    else
+    {
+        // Normal-range exponent
+        if (explicit_one) sw |= X87SW_C2;                 // Normal finite (010)
+        // else: unnormal — unsupported (000)
+    }
+    return sw;
+}
+
+//
+// FTST: compare ST(0) against +0.0. Result in C3:C2:C0 per Table 8-1.
+// NaN -> unordered (111) and #IA.  Denormal operand -> #D.
+//
+uint16_t fp80_t::x87_ftst(fp80_t const &src)
+{
+    uint16_t flags = 0;
+    if (src.isdenorm()) flags |= X87SW_DENORM_EX;
+    if (src.isnan())
+        return flags | X87SW_C3 | X87SW_C2 | X87SW_C0 | X87SW_INVALID_EX;
+    if (src.iszero())
+        return flags | X87SW_C3;
+    if (src.sign())
+        return flags | X87SW_C0;
+    return flags;
+}
+
+//
+// FCOM: compare two operands.  Sets #IA on any NaN (signaling or quiet);
+// sets #D if either operand is denormal.
+//
+uint16_t fp80_t::x87_fcom(fp80_t const &a, fp80_t const &b)
+{
+    uint16_t flags = 0;
+    if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
+    int c = compare_fp80_3way_trans(a, b);
+    if (c == 2) return flags | X87SW_C3 | X87SW_C2 | X87SW_C0 | X87SW_INVALID_EX;
+    if (c == 0) return flags | X87SW_C3;
+    if (c <  0) return flags | X87SW_C0;
+    return flags;
+}
+
+//
+// FUCOM: like FCOM but only signals #IA on signaling NaN.
+//
+uint16_t fp80_t::x87_fucom(fp80_t const &a, fp80_t const &b)
+{
+    uint16_t flags = 0;
+    if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
+    int c = compare_fp80_3way_trans(a, b);
+    if (c == 2)
+    {
+        uint16_t sw = flags | X87SW_C3 | X87SW_C2 | X87SW_C0;
+        if (a.issnan() || b.issnan()) sw |= X87SW_INVALID_EX;
+        return sw;
+    }
+    if (c == 0) return flags | X87SW_C3;
+    if (c <  0) return flags | X87SW_C0;
+    return flags;
+}
+
+//
+// FCOMI / FUCOMI: P6+ compares that write EFLAGS-style result bits. Our test
+// harness packs CF/PF/ZF into the C0/C2/C3 SW positions, so the C++ side
+// produces the same mapping (and never sets IE, since the asm oracle reads
+// the integer EFLAGS — IE only ever appears in the SW, never EFLAGS).
+//
+uint16_t fp80_t::x87_fcomi(fp80_t const &a, fp80_t const &b)
+{
+    int c = compare_fp80_3way_trans(a, b);
+    if (c == 2) return X87SW_C3 | X87SW_C2 | X87SW_C0;
+    if (c == 0) return X87SW_C3;
+    if (c <  0) return X87SW_C0;
+    return 0;
+}
+
+uint16_t fp80_t::x87_fucomi(fp80_t const &a, fp80_t const &b)
+{
+    // FUCOMI only differs from FCOMI in that it signals on SNaN — but again
+    // the asm oracle reads EFLAGS only, so IE is never observable here.
+    return x87_fcomi(a, b);
+}
 
 }

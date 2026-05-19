@@ -40,6 +40,7 @@
 
 #include "x87fp80.h"
 #include "x87fp64.h"
+#include "x87fpext.h"
 
 namespace x87
 {
@@ -472,28 +473,356 @@ template void fp80_t::x87_fist_common<int16_t>(x87cw_t cw, x87sw_t &sw, void *ds
 //
 //===========================================================================
 
-fp80_t operator+(fp80_t const &, fp80_t const &) { return fp80_t::const_indef(); }
-fp80_t operator-(fp80_t const &, fp80_t const &) { return fp80_t::const_indef(); }
-fp80_t operator*(fp80_t const &, fp80_t const &) { return fp80_t::const_indef(); }
-fp80_t operator/(fp80_t const &, fp80_t const &) { return fp80_t::const_indef(); }
+// operator+/-/*// delegate to x87_f*, discarding the SW.
+fp80_t operator+(fp80_t const &a, fp80_t const &b) { fp80_t r; fp80_t::x87_fadd (a, b, r); return r; }
+fp80_t operator-(fp80_t const &a, fp80_t const &b) { fp80_t r; fp80_t::x87_fsubr(a, b, r); return r; }
+fp80_t operator*(fp80_t const &a, fp80_t const &b) { fp80_t r; fp80_t::x87_fmul (a, b, r); return r; }
+fp80_t operator/(fp80_t const &a, fp80_t const &b) { fp80_t r; fp80_t::x87_fdivr(a, b, r); return r; }
 
-fp80_t fp80_t::sqrt(fp80_t const &)  { return fp80_t::const_indef(); }
-fp80_t fp80_t::floor(fp80_t const &) { return fp80_t::const_indef(); }
-fp80_t fp80_t::ceil(fp80_t const &)  { return fp80_t::const_indef(); }
+fp80_t fp80_t::sqrt(fp80_t const &src)
+{
+    fp80_t dst;
+    x87_fsqrt(src, dst);
+    return dst;
+}
 
-fp80_t fp80_t::ldexp(fp80_t const &, int32_t) { return fp80_t::const_indef(); }
+fp80_t fp80_t::floor(fp80_t const &src)
+{
+    fpround_t r(X87CW_ROUNDING_DOWN);
+    fp80_t dst;
+    x87_frndint(src, dst);
+    return dst;
+}
 
-bool fp80_t::operator< (fp80_t const &) const { return false; }
-bool fp80_t::operator<=(fp80_t const &) const { return false; }
-bool fp80_t::operator> (fp80_t const &) const { return false; }
-bool fp80_t::operator>=(fp80_t const &) const { return false; }
+fp80_t fp80_t::ceil(fp80_t const &src)
+{
+    fpround_t r(X87CW_ROUNDING_UP);
+    fp80_t dst;
+    x87_frndint(src, dst);
+    return dst;
+}
 
-uint16_t fp80_t::x87_fadd (fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
-uint16_t fp80_t::x87_fsub (fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
-uint16_t fp80_t::x87_fsubr(fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
-uint16_t fp80_t::x87_fmul (fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
-uint16_t fp80_t::x87_fdiv (fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
-uint16_t fp80_t::x87_fdivr(fp80_t const &, fp80_t const &, fp80_t &dst) { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
-uint16_t fp80_t::x87_fsqrt(fp80_t const &, fp80_t &dst)                 { dst = fp80_t::const_indef(); return X87SW_INVALID_EX; }
+fp80_t fp80_t::ldexp(fp80_t const &a, int32_t factor)
+{
+    if (a.iszero() || a.isnan() || a.isinf()) return a;
+    int     exp  = a.sign_exp() & FP80_EXPONENT_MASK;
+    uint16_t sign = a.sign_exp() & FP80_SIGN_MASK;
+    if (exp == 0) return a;  // denormal — leave as-is for now
+    int new_exp = exp + factor;
+    if (new_exp >= FP80_EXPONENT_MAX_BIASED)
+        return sign ? fp80_t::const_ninf() : fp80_t::const_pinf();
+    if (new_exp <= 0)
+        return sign ? fp80_t::const_nzero() : fp80_t::const_zero();
+    return fp80_t(a.mantissa(), sign | uint16_t(new_exp));
+}
+
+//
+// 3-way compare of two fp80 values. Returns:
+//    -1  a < b
+//     0  a == b
+//    +1  a > b
+//     2  unordered (either is NaN)
+// Handles signed zeros (+0 == -0) per IEEE 754.
+//
+static int compare_fp80_3way(fp80_t const &a, fp80_t const &b)
+{
+    if (a.isnan() || b.isnan()) return 2;
+    if (a.iszero() && b.iszero()) return 0;
+    bool an = a.sign() != 0;
+    bool bn = b.sign() != 0;
+    if (an != bn) return an ? -1 : 1;
+
+    // Same sign — compare unsigned magnitudes (exponent first then mantissa).
+    uint16_t ae = a.sign_exp() & FP80_EXPONENT_MASK;
+    uint16_t be = b.sign_exp() & FP80_EXPONENT_MASK;
+    int mag;
+    if (ae != be)               mag = (ae < be) ? -1 : 1;
+    else if (a.mantissa() != b.mantissa()) mag = (a.mantissa() < b.mantissa()) ? -1 : 1;
+    else                        mag = 0;
+    return an ? -mag : mag;
+}
+
+bool fp80_t::operator==(fp80_t const &rhs) const { int c = compare_fp80_3way(*this, rhs); return c == 0; }
+bool fp80_t::operator!=(fp80_t const &rhs) const { int c = compare_fp80_3way(*this, rhs); return c != 0; }
+bool fp80_t::operator< (fp80_t const &rhs) const { int c = compare_fp80_3way(*this, rhs); return c == -1; }
+bool fp80_t::operator<=(fp80_t const &rhs) const { int c = compare_fp80_3way(*this, rhs); return c == -1 || c == 0; }
+bool fp80_t::operator> (fp80_t const &rhs) const { int c = compare_fp80_3way(*this, rhs); return c == 1; }
+bool fp80_t::operator>=(fp80_t const &rhs) const { int c = compare_fp80_3way(*this, rhs); return c == 1 || c == 0; }
+
+//===========================================================================
+//
+// 80-bit arithmetic (NOTE: imperfect — uses fpext96_t for the math which
+// gives ~96-bit precision but only truncates rather than rounds back to
+// fp80 per the current CW. This produces correct values across the common
+// cases and reasonable behavior for special inputs, but the C1=roundup
+// bit and PC=24/53 truncation paths are not honored. A proper hand-rolled
+// implementation should replace these.)
+//
+//===========================================================================
+
+//
+// Compute "a + b" via fpext96_t plus full NaN/Inf/zero handling.
+// 'subtract' inverts b's sign before adding.
+//
+static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
+{
+    if (subtract) b = fp80_t::chs(b);
+
+    if (a.isnan() || b.isnan())
+    {
+        bool snan = a.issnan() || b.issnan();
+        if (a.isnan()) dst = a.issnan() ? fp80_t::make_qnan(a) : a;
+        else           dst = b.issnan() ? fp80_t::make_qnan(b) : b;
+        return snan ? X87SW_INVALID_EX : 0;
+    }
+    if (a.isinf() && b.isinf())
+    {
+        if (a.sign() != b.sign())
+        {
+            dst = fp80_t::const_indef();
+            return X87SW_INVALID_EX;
+        }
+        dst = a;
+        return 0;
+    }
+    if (a.isinf()) { dst = a; return 0; }
+    if (b.isinf()) { dst = b; return 0; }
+    if (a.iszero() && b.iszero())
+    {
+        if (a.sign() == b.sign())
+            dst = a;
+        else
+        {
+            x87cw_t r = fpround_t::get() & X87CW_ROUNDING_MASK;
+            dst = (r == X87CW_ROUNDING_DOWN) ? fp80_t::const_nzero() : fp80_t::const_zero();
+        }
+        return 0;
+    }
+    if (a.iszero()) { dst = b; return 0; }
+    if (b.iszero()) { dst = a; return 0; }
+
+    uint16_t flags = 0;
+    if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
+
+    fpext96_t ea(a), eb(b);
+    fpext96_t result;
+    result.add(ea, eb);
+    dst = result.as_fp80();
+
+    if (dst.isinf())                              flags |= X87SW_OVERFLOW_EX  | X87SW_PRECISION_EX;
+    else if (dst.iszero() && !(a.iszero() || b.iszero()))
+                                                  flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+    else if (dst.isdenorm())                      flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+    return flags;
+}
+
+//
+// Multiplication: same special cases as add; finite via fpext96_t::mul.
+//
+static uint16_t do_mul(fp80_t a, fp80_t b, fp80_t &dst)
+{
+    if (a.isnan() || b.isnan())
+    {
+        bool snan = a.issnan() || b.issnan();
+        if (a.isnan()) dst = a.issnan() ? fp80_t::make_qnan(a) : a;
+        else           dst = b.issnan() ? fp80_t::make_qnan(b) : b;
+        return snan ? X87SW_INVALID_EX : 0;
+    }
+    bool a_inf = a.isinf(), b_inf = b.isinf();
+    bool a_zero = a.iszero(), b_zero = b.iszero();
+    if ((a_inf && b_zero) || (a_zero && b_inf))
+    {
+        dst = fp80_t::const_indef();
+        return X87SW_INVALID_EX;
+    }
+    uint16_t result_sign = (a.sign() ^ b.sign()) ? FP80_SIGN_MASK : 0;
+    if (a_inf || b_inf) { dst = fp80_t(FP80_EXPLICIT_ONE, result_sign | FP80_EXPONENT_MAX_BIASED); return 0; }
+    if (a_zero || b_zero) { dst = fp80_t(0, result_sign); return 0; }
+
+    uint16_t flags = 0;
+    if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
+
+    fpext96_t ea(a), eb(b), result;
+    result.mul(ea, eb);
+    dst = result.as_fp80();
+
+    if (dst.isinf())                              flags |= X87SW_OVERFLOW_EX  | X87SW_PRECISION_EX;
+    else if (dst.iszero())                        flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+    else if (dst.isdenorm())                      flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+    return flags;
+}
+
+//
+// Division by hand using 128-bit / 64-bit integer division. This avoids the
+// precision loss in fpext96_t::div64 (which drops to fp64 internally) and the
+// crash that comes from passing overflow-fp64 results into the fpext96_t
+// constructor.
+//
+static uint16_t do_div(fp80_t a, fp80_t b, fp80_t &dst)
+{
+    if (a.isnan() || b.isnan())
+    {
+        bool snan = a.issnan() || b.issnan();
+        if (a.isnan()) dst = a.issnan() ? fp80_t::make_qnan(a) : a;
+        else           dst = b.issnan() ? fp80_t::make_qnan(b) : b;
+        return snan ? X87SW_INVALID_EX : 0;
+    }
+    bool a_inf = a.isinf(), b_inf = b.isinf();
+    bool a_zero = a.iszero(), b_zero = b.iszero();
+    if ((a_inf && b_inf) || (a_zero && b_zero))
+    {
+        dst = fp80_t::const_indef();
+        return X87SW_INVALID_EX;
+    }
+    uint16_t result_sign = (a.sign() ^ b.sign()) ? FP80_SIGN_MASK : 0;
+    if (b_zero)
+    {
+        dst = fp80_t(FP80_EXPLICIT_ONE, result_sign | FP80_EXPONENT_MAX_BIASED);
+        return X87SW_DIVZERO_EX;
+    }
+    if (a_inf)  { dst = fp80_t(FP80_EXPLICIT_ONE, result_sign | FP80_EXPONENT_MAX_BIASED); return 0; }
+    if (b_inf)  { dst = fp80_t(0, result_sign); return 0; }
+    if (a_zero) { dst = fp80_t(0, result_sign); return 0; }
+
+    uint16_t flags = 0;
+    if (a.isdenorm() || b.isdenorm()) flags |= X87SW_DENORM_EX;
+
+    // Normalize denormals so both operands have an explicit-1 in the MSB.
+    uint64_t a_mant = a.mantissa();
+    uint64_t b_mant = b.mantissa();
+    int a_exp = (a.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+    int b_exp = (b.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+    if (a.isdenorm()) { int s = count_leading_zeros64(a_mant); a_mant <<= s; a_exp = 1 - FP80_EXPONENT_BIAS - s; }
+    if (b.isdenorm()) { int s = count_leading_zeros64(b_mant); b_mant <<= s; b_exp = 1 - FP80_EXPONENT_BIAS - s; }
+
+    // 128-bit / 64-bit: shift the numerator up 63 bits so the 64-bit
+    // quotient sits at a known precision.
+    unsigned __int128 num = (unsigned __int128)a_mant << 63;
+    uint64_t quot = uint64_t(num / b_mant);
+    unsigned __int128 prod = (unsigned __int128)quot * b_mant;
+    bool inexact = (num != prod);
+
+    int result_exp = a_exp - b_exp;
+    // The quotient is either [1, 2) or [2, 4) at this point depending on
+    // a_mant vs b_mant. Normalize so the explicit 1 is at bit 63.
+    if ((quot & (1ull << 63)) == 0)
+    {
+        quot <<= 1;
+        result_exp -= 1;
+        // We need an extra bit; if there was a remainder it's now sticky.
+        // (Approximation: ignore the extra round bit; precision loss tracked
+        // via PE flag.)
+    }
+    result_exp += FP80_EXPONENT_BIAS;
+
+    if (result_exp >= FP80_EXPONENT_MAX_BIASED)
+    {
+        dst = fp80_t(FP80_EXPLICIT_ONE, result_sign | FP80_EXPONENT_MAX_BIASED);
+        return flags | X87SW_OVERFLOW_EX | X87SW_PRECISION_EX;
+    }
+    if (result_exp <= 0)
+    {
+        dst = fp80_t(0, result_sign);
+        return flags | X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+    }
+    dst = fp80_t(quot, result_sign | uint16_t(result_exp));
+    return flags | (inexact ? X87SW_PRECISION_EX : 0);
+}
+
+// Asm convention notes (matching the order ARG1->ST(0), ARG2->ST(1)):
+//   FADDP    ST(1) <- ST(1)+ST(0)  ⇒ result = ARG1 + ARG2  (symmetric)
+//   FSUBP    ST(1) <- ST(1)-ST(0)  ⇒ result = ARG2 - ARG1
+//   FSUBRP   ST(1) <- ST(0)-ST(1)  ⇒ result = ARG1 - ARG2
+//   FMULP    ST(1) <- ST(1)*ST(0)  ⇒ result = ARG1 * ARG2  (symmetric)
+//   FDIVP    ST(1) <- ST(1)/ST(0)  ⇒ result = ARG2 / ARG1
+//   FDIVRP   ST(1) <- ST(0)/ST(1)  ⇒ result = ARG1 / ARG2
+uint16_t fp80_t::x87_fadd (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_add(a, b, dst, false); }
+uint16_t fp80_t::x87_fsub (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_add(b, a, dst, true);  }
+uint16_t fp80_t::x87_fsubr(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_add(a, b, dst, true);  }
+uint16_t fp80_t::x87_fmul (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_mul(a, b, dst);        }
+uint16_t fp80_t::x87_fdiv (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_div(b, a, dst);        }
+uint16_t fp80_t::x87_fdivr(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return do_div(a, b, dst);        }
+
+//
+// Square root via Newton-Raphson on the (split) mantissa.  We extract an
+// even-exponent mantissa in [1.0, 4.0), compute sqrt to 64-bit precision via
+// integer NR, then reassemble with exp/2.  Avoids the fp64 conversion path.
+//
+uint16_t fp80_t::x87_fsqrt(fp80_t const &src, fp80_t &dst)
+{
+    if (src.isnan())
+    {
+        dst = src.issnan() ? fp80_t::make_qnan(src) : src;
+        return src.issnan() ? X87SW_INVALID_EX : 0;
+    }
+    if (src.iszero()) { dst = src; return 0; }
+    if (src.sign())
+    {
+        dst = fp80_t::const_indef();
+        return X87SW_INVALID_EX;
+    }
+    if (src.isinf()) { dst = src; return 0; }
+
+    uint16_t flags = src.isdenorm() ? X87SW_DENORM_EX : 0;
+
+    uint64_t mant = src.mantissa();
+    int      exp  = (src.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+    if (src.isdenorm())
+    {
+        int s = count_leading_zeros64(mant);
+        mant <<= s;
+        exp = 1 - FP80_EXPONENT_BIAS - s;
+    }
+
+    // For sqrt we want an even exponent so that exp/2 is exact. If exp is
+    // odd, halve mantissa and use exp+1 (now even).
+    if (exp & 1)
+    {
+        mant >>= 1;
+        exp  += 1;
+    }
+    int result_exp = exp >> 1;
+
+    // Initial estimate: a single iteration of Newton-Raphson starting from
+    // mant/2 + (3<<61) gets us into the right ballpark.  Then refine
+    // a handful more times to reach 64-bit precision.
+    //
+    // We compute y = sqrt(x) where x = mant/2^63 viewed in [1.0, 4.0).
+    // Using fixed-point representation with mant in [2^63, 2^65) (so the
+    // result fits in [2^31, 2^33) of the same fixed-point), and 128-bit
+    // intermediate division.
+    unsigned __int128 x128 = ((unsigned __int128)mant) << 63;     // x at .126 fixed point
+    uint64_t y = mant;                                            // crude initial estimate
+    for (int i = 0; i < 6; i++)
+    {
+        if (y == 0) break;
+        unsigned __int128 q = x128 / y;     // ~128-bit / 64-bit
+        uint64_t nq = uint64_t(q);
+        y = (y >> 1) + (nq >> 1) + ((y & nq) & 1);  // (y + x/y) / 2 rounded
+    }
+
+    // Now y is sqrt(mant) approximately, scaled. Renormalize so the
+    // explicit-1 bit is at position 63.
+    int lz = count_leading_zeros64(y);
+    if (lz > 0)
+    {
+        y <<= lz;
+        result_exp -= lz;
+    }
+    result_exp += FP80_EXPONENT_BIAS;
+
+    if (result_exp >= FP80_EXPONENT_MAX_BIASED)
+    {
+        dst = fp80_t::const_pinf();
+        return flags | X87SW_OVERFLOW_EX | X87SW_PRECISION_EX;
+    }
+    if (result_exp <= 0)
+    {
+        dst = fp80_t::const_zero();
+        return flags | X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+    }
+    dst = fp80_t(y, uint16_t(result_exp));
+    return flags | X87SW_PRECISION_EX;
+}
 
 }

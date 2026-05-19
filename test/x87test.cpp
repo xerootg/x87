@@ -1770,9 +1770,15 @@ int main(int argc, char *argv[])
     // These tests use the SW-returning entry points (x87_fadd etc.) so
     // C1=roundup and the precision/underflow/overflow/invalid exception
     // bits are validated against the real FPU rather than ignored.
+    //
+    // QUICKMODE: when X87_QUICK is set in the environment, only one CW
+    // combination is exercised so the suite finishes in <2 minutes for
+    // implementation iteration. Unset for the full 12-mode sweep.
+    bool quick = getenv("X87_QUICK") != nullptr;
     for (uint32_t prec = 0; prec < s_precision.size(); prec++)
         for (uint32_t round = 0; round < s_round.size(); round++)
         {
+            if (quick && !(prec == 0 && round == 0)) continue;
             cw = X87CW_MASK_ALL_EX | s_precision[prec] | s_round[round];
             x87setcw(&cw);
             print("80-bit arithmetic: precision {} round {}\n", prec, round);
