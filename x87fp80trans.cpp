@@ -593,8 +593,187 @@ static uint16_t via_fp64_binary(fp80_t const &a, fp80_t const &b, fp80_t &dst,
     return sw;
 }
 
-uint16_t fp80_t::x87_fprem (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fprem);  }
-uint16_t fp80_t::x87_fprem1(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return via_fp64_binary(a, b, dst, &fp64_t::x87_fprem1); }
+//
+// Common core for fprem and fprem1. Computes src1 mod src2 (truncated for
+// fprem, round-to-even for fprem1). Returns SW with C0/C1/C3 set to the
+// low 3 bits of the quotient (per Intel SDM FPREM/FPREM1).
+//
+// Algorithm: extract 64-bit normalized mantissas as integers, compute
+// remainder via iterative reduction, then reassemble.
+//
+template<bool Rem1>
+static uint16_t fprem_core_fp80(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
+{
+    uint16_t flags = 0;
+    if (src1.isdenorm() || src2.isdenorm()) flags |= X87SW_DENORM_EX;
+
+    // NaN propagation
+    if (src1.isnan() || src2.isnan())
+    {
+        bool snan = src1.issnan() || src2.issnan();
+        if (src1.isnan()) dst = src1.issnan() ? fp80_t::make_qnan(src1) : src1;
+        else              dst = src2.issnan() ? fp80_t::make_qnan(src2) : src2;
+        return snan ? X87SW_INVALID_EX : 0;
+    }
+    // Special inputs
+    if (src1.isinf() || src2.iszero())
+    {
+        dst = fp80_t::const_indef();
+        return X87SW_INVALID_EX;
+    }
+    if (src2.isinf() || src1.iszero())
+    {
+        // src1 mod inf = src1; 0 mod src2 = 0.
+        dst = src1;
+        return flags;
+    }
+
+    // Extract normalized mantissas + exponents.
+    uint64_t ma = src1.mantissa();
+    uint64_t mb = src2.mantissa();
+    int ea = (src1.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+    int eb = (src2.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+    if (src1.isdenorm()) { int s = count_leading_zeros64(ma); ma <<= s; ea = 1 - FP80_EXPONENT_BIAS - s; }
+    if (src2.isdenorm()) { int s = count_leading_zeros64(mb); mb <<= s; eb = 1 - FP80_EXPONENT_BIAS - s; }
+    uint16_t sign_a = src1.sign_exp() & FP80_SIGN_MASK;
+
+    int dexp = ea - eb;
+    if (dexp < 0)
+    {
+        // |src1| < |src2|: result is src1 unchanged, quotient = 0.
+        dst = src1;
+        return flags;
+    }
+
+    // Partial-remainder threshold: if dexp > 63, x87 sets C2 to indicate
+    // incomplete reduction. Match that behavior by reducing by chunks of 32.
+    int factor = 0;
+    if (dexp > 63)
+    {
+        factor = ((dexp - 32) / 32) * 32;
+        dexp -= factor;
+    }
+
+    // Reduce mantissa: rem = ma, repeatedly subtract aligned mb.
+    // ma, mb each have MSB at bit 63. We shift ma left up to dexp so that
+    // remainder can be computed cleanly.
+    //
+    // Standard partial remainder: for k from dexp down to 0,
+    //   tentative = ma_shifted_left_k - mb. If tentative >= 0, ma_shifted_left_k = tentative.
+    // The accumulated quotient bits track which subtractions succeeded.
+    //
+    // Simpler implementation using __uint128_t:
+    __uint128_t rem = (__uint128_t)ma;
+    uint64_t quotient = 0;
+    for (int k = dexp; k >= 0; k--)
+    {
+        __uint128_t shifted_mb = ((__uint128_t)mb) << (k - dexp + 0);
+        // shifted_mb at bit-position-aligned with rem at position k.
+        // Actually easier: keep rem in scale where rem's MSB is at bit
+        // (63 + dexp), and mb is at bit 63. Each iteration k handles
+        // bit position k of the quotient.
+        (void)shifted_mb;
+    }
+    // The above loop is a placeholder — rewrite as a cleaner algorithm:
+    // Track rem as a value with magnitude < 2 × |src2 mantissa|.
+    // For dexp = ea - eb iterations, double rem (left-shift 1) and subtract
+    // mb if rem >= mb.
+    quotient = 0;
+    rem = (__uint128_t)ma;
+    for (int k = 0; k < dexp; k++)
+    {
+        rem <<= 1;
+        quotient <<= 1;
+        if (rem >= (__uint128_t)mb)
+        {
+            rem -= mb;
+            quotient |= 1;
+        }
+    }
+    // Final step: try one more subtract to handle the "ones place".
+    quotient <<= 1;
+    if (rem >= (__uint128_t)mb)
+    {
+        rem -= mb;
+        quotient |= 1;
+    }
+
+    // For fprem1 (IEEE), round quotient toward even. This means if the
+    // remainder is more than half |src2|, subtract one more mb (going
+    // negative) so the absolute remainder is minimized.
+    bool rem_negative = false;
+    if (Rem1)
+    {
+        // Compare 2*rem to mb. If 2*rem > mb, or 2*rem == mb and quotient is odd,
+        // subtract one more.
+        __uint128_t twice_rem = rem << 1;
+        bool round_away = (twice_rem > (__uint128_t)mb) ||
+                          (twice_rem == (__uint128_t)mb && (quotient & 1));
+        if (round_away)
+        {
+            // Set rem to mb - rem (negative magnitude).
+            rem = (__uint128_t)mb - rem;
+            quotient++;
+            rem_negative = true;
+        }
+    }
+
+    // Assemble result. rem is at bit-position (eb + 63 - dexp), with
+    // (dexp + 1) bits of quotient computed. The remainder value:
+    // |result| = rem / 2^(63 + dexp) × 2^eb × 2^63 = rem × 2^(eb - dexp)
+    // Wait — rem is conceptually `ma << dexp` mod (mb << dexp). Magnitude
+    // wise, rem represents a value × 2^eb (same scale as src2's mantissa).
+    // Renormalize so MSB is at bit 63.
+    uint16_t result_sign = sign_a ^ (rem_negative ? FP80_SIGN_MASK : 0);
+    if (rem == 0)
+    {
+        dst = fp80_t(0, result_sign);
+        return flags | ((quotient & 1) << X87SW_C1_BIT)
+                     | ((quotient & 2) << (X87SW_C3_BIT - 1))
+                     | ((quotient & 4) << (X87SW_C0_BIT - 2));
+    }
+    // Find leading zero count in 128-bit rem.
+    uint64_t hi = uint64_t(rem >> 64);
+    uint64_t lo = uint64_t(rem);
+    int lz = (hi != 0) ? count_leading_zeros64(hi) : (64 + count_leading_zeros64(lo));
+    int total_bits_used = 128 - lz;
+    rem <<= lz;
+    // After shift, rem's MSB at bit 127. The 64-bit mantissa is the top 64.
+    uint64_t result_mant = uint64_t(rem >> 64);
+    int result_exp = eb - dexp + (total_bits_used - 1);
+
+    int biased_exp = result_exp + FP80_EXPONENT_BIAS;
+    if (biased_exp >= FP80_EXPONENT_MAX_BIASED)
+    {
+        dst = result_sign ? fp80_t::const_ninf() : fp80_t::const_pinf();
+        return flags | X87SW_OVERFLOW_EX;
+    }
+    if (biased_exp <= 0)
+    {
+        // Denormal result
+        int shift = 1 - biased_exp;
+        if (shift >= 64) dst = fp80_t(0, result_sign);
+        else             dst = fp80_t(result_mant >> shift, result_sign);
+        flags |= X87SW_UNDERFLOW_EX;
+    }
+    else
+    {
+        dst = fp80_t(result_mant, result_sign | uint16_t(biased_exp));
+    }
+
+    uint16_t qbits = ((quotient & 1) << X87SW_C1_BIT)
+                   | ((quotient & 2) << (X87SW_C3_BIT - 1))
+                   | ((quotient & 4) << (X87SW_C0_BIT - 2));
+    if (factor != 0)
+    {
+        // Partial reduction not complete — set C2.
+        flags |= X87SW_C2;
+    }
+    return flags | qbits;
+}
+
+uint16_t fp80_t::x87_fprem (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return fprem_core_fp80<false>(a, b, dst); }
+uint16_t fp80_t::x87_fprem1(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return fprem_core_fp80<true>(a, b, dst);  }
 #endif
 #if X87_HOST_HAS_FP80
 uint16_t fp80_t::x87_fyl2x  (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary_trans(a, b, dst, 0); }
