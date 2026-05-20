@@ -1413,8 +1413,103 @@ uint16_t fp80_t::x87_fcos(fp80_t const &src, fp80_t &dst)
     flags |= X87SW_PRECISION_EX | X87SW_C1;
     return flags;
 }
-uint16_t fp80_t::x87_fsincos(fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return via_fp64_unary2(a, d1, d2, &fp64_t::x87_fsincos); }
-uint16_t fp80_t::x87_fptan  (fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return via_fp64_unary2(a, d1, d2, &fp64_t::x87_fptan); }
+uint16_t fp80_t::x87_fsincos(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
+{
+    // dst1 = cos, dst2 = sin (matches asm/test convention from fxtract-style
+    // unary_2 ops). Reuse the single range reduction for efficiency.
+    uint16_t flags = src.isdenorm() ? X87SW_DENORM_EX : 0;
+    if (src.isnan())
+    {
+        dst1 = src.issnan() ? fp80_t::make_qnan(src) : src;
+        dst2 = dst1;
+        return src.issnan() ? X87SW_INVALID_EX : 0;
+    }
+    if (src.isinf())
+    {
+        dst1 = fp80_t::const_indef();
+        dst2 = fp80_t::const_indef();
+        return X87SW_INVALID_EX;
+    }
+    if (src.iszero())
+    {
+        dst1 = fp80_t::const_one();   // cos
+        dst2 = src;                    // sin
+        return 0;
+    }
+    if ((src.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS > 62)
+    {
+        dst1 = src; dst2 = src;
+        return flags | X87SW_C2;
+    }
+    fpext_t y;
+    int q = range_reduce(src, y);
+    fpext_t s_ext = taylor_sin(y);
+    fpext_t c_ext = taylor_cos(y);
+    fpext_t sin_r, cos_r;
+    switch (q & 3)
+    {
+        case 0: sin_r = s_ext;            cos_r = c_ext;            break;
+        case 1: sin_r = c_ext;            cos_r = s_ext; cos_r.chs(); break;
+        case 2: sin_r = s_ext; sin_r.chs(); cos_r = c_ext; cos_r.chs(); break;
+        case 3: sin_r = c_ext; sin_r.chs(); cos_r = s_ext;            break;
+    }
+    uint16_t f1 = flags, f2 = flags;
+    dst1 = round_fpext96_to_fp80(cos_r, read_x87_cw(), f1);
+    dst2 = round_fpext96_to_fp80(sin_r, read_x87_cw(), f2);
+    return flags | X87SW_PRECISION_EX | X87SW_C1;
+}
+
+uint16_t fp80_t::x87_fptan(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
+{
+    // tan(x) = sin/cos. dst1 = 1.0 (per asm convention), dst2 = tan(x).
+    uint16_t flags = src.isdenorm() ? X87SW_DENORM_EX : 0;
+    if (src.isnan())
+    {
+        dst1 = src.issnan() ? fp80_t::make_qnan(src) : src;
+        dst2 = dst1;
+        return src.issnan() ? X87SW_INVALID_EX : 0;
+    }
+    if (src.isinf())
+    {
+        dst1 = fp80_t::const_indef();
+        dst2 = fp80_t::const_indef();
+        return X87SW_INVALID_EX;
+    }
+    if (src.iszero())
+    {
+        dst1 = fp80_t::const_one();
+        dst2 = src;
+        return 0;
+    }
+    if ((src.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS > 62)
+    {
+        // Out of range: result unchanged, C2 set. Asm fptan pushes 1.0
+        // even in this case but the stored values per test are src + src.
+        dst1 = src; dst2 = src;
+        return flags | X87SW_C2;
+    }
+    fpext_t y;
+    int q = range_reduce(src, y);
+    fpext_t s_ext = taylor_sin(y);
+    fpext_t c_ext = taylor_cos(y);
+    fpext_t sin_r, cos_r;
+    switch (q & 3)
+    {
+        case 0: sin_r = s_ext;            cos_r = c_ext;            break;
+        case 1: sin_r = c_ext;            cos_r = s_ext; cos_r.chs(); break;
+        case 2: sin_r = s_ext; sin_r.chs(); cos_r = c_ext; cos_r.chs(); break;
+        case 3: sin_r = c_ext; sin_r.chs(); cos_r = s_ext;            break;
+    }
+    // tan = sin / cos via fp80 division.
+    uint16_t f_sin = flags, f_cos = flags;
+    fp80_t sin80 = round_fpext96_to_fp80(sin_r, read_x87_cw(), f_sin);
+    fp80_t cos80 = round_fpext96_to_fp80(cos_r, read_x87_cw(), f_cos);
+    fp80_t tan80;
+    fp80_t::x87_fdivr(sin80, cos80, tan80);   // tan = sin/cos
+    dst1 = fp80_t::const_one();
+    dst2 = tan80;
+    return flags | X87SW_PRECISION_EX | X87SW_C1;
+}
 #endif
 #if X87_HOST_HAS_FP80
 uint16_t fp80_t::x87_frndint(fp80_t const &src, fp80_t &dst)
