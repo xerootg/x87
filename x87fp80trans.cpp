@@ -733,29 +733,54 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
         return return_pi_const(src2.sign() ? npi80 : pi80);
     }
 
-    // Cephes long-double polynomial (fp80-precision coefficients).
-    static std::array<fpext_t, 5> const P =
-    {
-        fpext_t(0xab592c6f0312517aull, 0x00000000, 5, 1),
-        fpext_t(0xacb8ff96e38fc5ecull, 0x00000000, 6, 1),
-        fpext_t(0xe48acd38ac80eeb7ull, 0x00000000, 5, 1),
-        fpext_t(0xdb6cc72849c9b699ull, 0x00000000, 3, 1),
-        fpext_t(0xdd2366bb59c287a9ull, 0x00000000, -1, 1),
-    };
-    static std::array<fpext_t, 5> const Q =
-    {
-        fpext_t(0x9370afdae1699f0bull, 0x00000000, 7, 0),
-        fpext_t(0xbe705cf6fe4c98a0ull, 0x00000000, 8, 0),
-        fpext_t(0xa9d8280ce860064bull, 0x00000000, 8, 0),
-        fpext_t(0xf62a6f2dea7a25d3ull, 0x00000000, 6, 0),
-        fpext_t(0xee2df34eaba2b74aull, 0x00000000, 3, 0),
+    // Taylor coefficients for atan(x) = x * Σ (-1)^k x^(2k) / (2k+1).
+    // Stored in Horner order (highest power first). 36 terms give ~100-bit
+    // precision on the range |x| ≤ tan(π/8) ≈ 0.4142.
+    static std::array<fpext_t, 36> const TAY = {
+        fpext_t(0xe6c2b4481cd85689ull, 0x00000000, -7, 1),  // -1/71
+        fpext_t(0xed7303b5cc0ed730ull, 0x00000000, -7, 0),  //  1/69
+        fpext_t(0xf4898d5f85bb3950ull, 0x00000000, -7, 1),  // -1/67
+        fpext_t(0xfc0fc0fc0fc0fc10ull, 0x00000000, -7, 0),  //  1/65
+        fpext_t(0x8208208208208208ull, 0x00000000, -6, 1),  // -1/63
+        fpext_t(0x864b8a7de6d1d608ull, 0x00000000, -6, 0),  //  1/61
+        fpext_t(0x8ad8f2fba9386823ull, 0x00000000, -6, 1),  // -1/59
+        fpext_t(0x8fb823ee08fb823full, 0x00000000, -6, 0),  //  1/57
+        fpext_t(0x94f2094f2094f209ull, 0x00000000, -6, 1),  // -1/55
+        fpext_t(0x9a90e7d95bc609a9ull, 0x00000000, -6, 0),  //  1/53
+        fpext_t(0xa0a0a0a0a0a0a0a1ull, 0x00000000, -6, 1),  // -1/51
+        fpext_t(0xa72f05397829cbc1ull, 0x00000000, -6, 0),  //  1/49
+        fpext_t(0xae4c415c9882b931ull, 0x00000000, -6, 1),  // -1/47
+        fpext_t(0xb60b60b60b60b60bull, 0x00000000, -6, 0),  //  1/45
+        fpext_t(0xbe82fa0be82fa0bfull, 0x00000000, -6, 1),  // -1/43
+        fpext_t(0xc7ce0c7ce0c7ce0cull, 0x00000000, -6, 0),  //  1/41
+        fpext_t(0xd20d20d20d20d20dull, 0x00000000, -6, 1),  // -1/39
+        fpext_t(0xdd67c8a60dd67c8aull, 0x00000000, -6, 0),  //  1/37
+        fpext_t(0xea0ea0ea0ea0ea0full, 0x00000000, -6, 1),  // -1/35
+        fpext_t(0xf83e0f83e0f83e10ull, 0x00000000, -6, 0),  //  1/33
+        fpext_t(0x8421084210842108ull, 0x00000000, -5, 1),  // -1/31
+        fpext_t(0x8d3dcb08d3dcb08dull, 0x00000000, -5, 0),  //  1/29
+        fpext_t(0x97b425ed097b425full, 0x00000000, -5, 1),  // -1/27
+        fpext_t(0xa3d70a3d70a3d70aull, 0x00000000, -5, 0),  //  1/25
+        fpext_t(0xb21642c8590b2164ull, 0x00000000, -5, 1),  // -1/23
+        fpext_t(0xc30c30c30c30c30cull, 0x00000000, -5, 0),  //  1/21
+        fpext_t(0xd79435e50d79435eull, 0x00000000, -5, 1),  // -1/19
+        fpext_t(0xf0f0f0f0f0f0f0f1ull, 0x00000000, -5, 0),  //  1/17
+        fpext_t(0x8888888888888889ull, 0x00000000, -4, 1),  // -1/15
+        fpext_t(0x9d89d89d89d89d8aull, 0x00000000, -4, 0),  //  1/13
+        fpext_t(0xba2e8ba2e8ba2e8cull, 0x00000000, -4, 1),  // -1/11
+        fpext_t(0xe38e38e38e38e38eull, 0x00000000, -4, 0),  //  1/9
+        fpext_t(0x9249249249249249ull, 0x00000000, -3, 1),  // -1/7
+        fpext_t(0xcccccccccccccccdull, 0x00000000, -3, 0),  //  1/5
+        fpext_t(0xaaaaaaaaaaaaaaabull, 0x00000000, -2, 1),  // -1/3
+        fpext_t(0x8000000000000000ull, 0x00000000, 0, 0),   //  1
     };
     static fpext_t const T3P8(0x9a827999fcef3242ull, 0x00000000, 1, 0);
     static fpext_t const TP8 (0xd413cccfe7799211ull, 0x00000000, -2, 0);
 
     // x = |src2 / src1| (fp80 division for full precision).
+    // x87_fdivr(a,b) computes a/b; we want src2/src1 so pass (src2, src1).
     fp80_t x_fp80;
-    fp80_t::x87_fdivr(src1, src2, x_fp80);   // x_fp80 = src2 / src1
+    fp80_t::x87_fdivr(src2, src1, x_fp80);   // x_fp80 = src2 / src1
     bool inner_sign = (x_fp80.sign() != 0);
     if (inner_sign) x_fp80 = fp80_t::chs(x_fp80);
 
@@ -786,11 +811,10 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
         if (x_gt_t3p8)
         {
             yext = pio2_80;
+            // xext = -1 / x   →   need fdivr(1, x) = 1/x.
             fp80_t one = fp80_t::const_one();
             fp80_t recip;
-            fp80_t::x87_fdivr(x_fp80, one, recip);
-            // Defensive: if recip became special (huge x → tiny but possibly
-            // 0, or numerical edge), skip polynomial correction.
+            fp80_t::x87_fdivr(one, x_fp80, recip);   // recip = 1 / x
             if (recip.isnan() || recip.isinf() || recip.iszero())
             {
                 xext = fpext_t::zero;
@@ -806,11 +830,13 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
         else if (x_gt_tp8)
         {
             yext = pio4_80;
+            // xext = (x - 1) / (x + 1)
+            // x87_fsubr(a,b) = a - b; x87_fadd is symmetric; x87_fdivr(a,b) = a/b.
             fp80_t one = fp80_t::const_one();
             fp80_t num, denom, ratio;
-            fp80_t::x87_fsubr(x_fp80, one, num);
-            fp80_t::x87_fadd (x_fp80, one, denom);
-            fp80_t::x87_fdivr(denom, num, ratio);
+            fp80_t::x87_fsubr(x_fp80, one, num);     // num = x - 1
+            fp80_t::x87_fadd (x_fp80, one, denom);   // denom = x + 1
+            fp80_t::x87_fdivr(num, denom, ratio);    // ratio = num / denom
             if (ratio.isnan() || ratio.isinf())
             {
                 xext = fpext_t::zero;
@@ -834,22 +860,14 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
 
         if (!skip_poly)
         {
+            // Taylor: atan(x) = x * Σ_k (-1)^k x^(2k)/(2k+1).
+            // Horner on z = x²; coefficients pre-stored highest-power-first.
             fpext_t z = xext * xext;
-            fpext_t numer = poly_eval80(z, P);
-            fpext_t denom = poly1_eval80(z, Q);
-            // div64 routes through fp64; guard against fp64 overflow.
-            fp64_t numer_64 = numer.as_fp64();
-            fp64_t denom_64 = denom.as_fp64();
-            if (!numer_64.isinf() && !numer_64.isnan() &&
-                !denom_64.isinf() && !denom_64.isnan() && !denom_64.iszero())
-            {
-                fpext_t poly_part = numer.div64(denom) * z * xext;
-                yext = yext + poly_part + xext;
-            }
-            else
-            {
-                yext = yext + xext;     // best-effort
-            }
+            fpext_t p = TAY[0];
+            for (size_t i = 1; i < TAY.size(); i++)
+                p = p * z + TAY[i];
+            fpext_t atan_x = xext * p;
+            yext = yext + atan_x;
         }
     }
 
@@ -861,7 +879,10 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     else if (code == 3) yext = yext + npi80;
 
     dst = round_fpext96_to_fp80(yext, read_x87_cw(), flags);
-    flags |= X87SW_PRECISION_EX;
+    // For transcendentals, Intel x87 hardware appears to always assert C1
+    // alongside PE — likely because the internal extra-precision result
+    // always undergoes some rounding to fit the 64-bit fp80 mantissa.
+    flags |= X87SW_PRECISION_EX | X87SW_C1;
 
     // For sign of zero: if src2 is negative, result of zero gets a minus.
     if (dst.iszero() && src2.sign())
@@ -1120,13 +1141,11 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
     }
 
     // log(1 + x) via the (1+x - 1) / (1+x + 1) = x/(x+2) substitution.
-    // Use fp80 division to handle the full fp80 range (div64 overflows in
-    // fp64 land for huge src1).
     fp80_t two_fp80(0x8000000000000000ull, 0x4000);   // 2.0
     fp80_t denom_fp80;
     fp80_t::x87_fadd(src1, two_fp80, denom_fp80);
     fp80_t s_fp80;
-    fp80_t::x87_fdivr(denom_fp80, src1, s_fp80);   // s = src1 / denom
+    fp80_t::x87_fdivr(src1, denom_fp80, s_fp80);   // s = src1 / denom
     if (s_fp80.ismaxexp() || denom_fp80.ismaxexp())
     {
         // Numerical edge — fall back to via_fp64 to get something reasonable.
