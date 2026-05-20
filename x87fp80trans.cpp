@@ -1195,8 +1195,224 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
     dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
     return flags;
 }
-uint16_t fp80_t::x87_fsin   (fp80_t const &a, fp80_t &dst)                  { return via_fp64_unary(a, dst, &fp64_t::x87_fsin); }
-uint16_t fp80_t::x87_fcos   (fp80_t const &a, fp80_t &dst)                  { return via_fp64_unary(a, dst, &fp64_t::x87_fcos); }
+//
+// Shared sin/cos Taylor coefficients (Horner order: highest power first).
+// Defined at namespace scope so both x87_fsin and x87_fcos can share them.
+//
+namespace {
+
+using fpext_t = fpext96_t;
+
+// sin(y) = y * Σ_k (-1)^k y^(2k) / (2k+1)!
+// 26 terms gives ~120-bit precision on |y| ≤ π/4.
+static std::array<fpext_t, 26> const SIN_T = {
+    fpext_t(0x8b0c395fbdc119bdull, 0x00000000, -220, 1),  // k=25 -1/(51!)
+    fpext_t(0xad21786ff5842eccull, 0x00000000, -209, 0),  // k=24
+    fpext_t(0xc6d4705093f5cdbeull, 0x00000000, -198, 1),  // k=23
+    fpext_t(0xd1e5c39110323c71ull, 0x00000000, -187, 0),  // k=22
+    fpext_t(0xcaeda292bf289170ull, 0x00000000, -176, 1),  // k=21
+    fpext_t(0xb2f30e1ce8120641ull, 0x00000000, -165, 0),  // k=20
+    fpext_t(0x8f4ca24d25d66f01ull, 0x00000000, -154, 1),  // k=19
+    fpext_t(0xcf6468e4a742d7a7ull, 0x00000000, -144, 0),  // k=18
+    fpext_t(0x86e2ce38b6c8f941ull, 0x00000000, -133, 1),  // k=17
+    fpext_t(0x9cc092a6e86a8da9ull, 0x00000000, -123, 0),  // k=16
+    fpext_t(0xa1a6973c1fade217ull, 0x00000000, -113, 1),  // k=15
+    fpext_t(0x92cfcc5a1ac56bd6ull, 0x00000000, -103, 0),  // k=14
+    fpext_t(0xe8d58e16e6751904ull, 0x00000000, -94, 1),   // k=13
+    fpext_t(0x9f9e66e8b2fd46a7ull, 0x00000000, -84, 0),   // k=12
+    fpext_t(0xbb0da098b1c0ceccull, 0x00000000, -75, 1),   // k=11
+    fpext_t(0xb8dc77b6e7ab8c5full, 0x00000000, -66, 0),   // k=10
+    fpext_t(0x97a4da340a0ab926ull, 0x00000000, -57, 1),   // k=9
+    fpext_t(0xca963b81856a5359ull, 0x00000000, -49, 0),   // k=8
+    fpext_t(0xd73f9f399dc0f88full, 0x00000000, -41, 1),   // k=7
+    fpext_t(0xb092309d43684be5ull, 0x00000000, -33, 0),   // k=6
+    fpext_t(0xd7322b3faa271c7full, 0x00000000, -26, 1),   // k=5
+    fpext_t(0xb8ef1d2ab6399c7dull, 0x00000000, -19, 0),   // k=4
+    fpext_t(0xd00d00d00d00d00dull, 0x00000000, -13, 1),   // k=3 -1/5040
+    fpext_t(0x8888888888888889ull, 0x00000000, -7, 0),    // k=2  1/120
+    fpext_t(0xaaaaaaaaaaaaaaabull, 0x00000000, -3, 1),    // k=1 -1/6
+    fpext_t(0x8000000000000000ull, 0x00000000, 0, 0),     // k=0  1
+};
+
+// cos(y) = Σ_k (-1)^k y^(2k) / (2k)!
+static std::array<fpext_t, 26> const COS_T = {
+    fpext_t(0xc4eaadfb83fef25dull, 0x00000000, -226, 1),  // k=25 (computed below)
+    fpext_t(0x86b6c2c12cad6c00ull, 0x00000000, -214, 0),  // k=24
+    fpext_t(0xacd3257cd9fb78b3ull, 0x00000000, -203, 1),  // k=23
+    fpext_t(0xcbef47f7e2dd2cd2ull, 0x00000000, -192, 0),  // k=22
+    fpext_t(0xdb3f3ee47cdac373ull, 0x00000000, -181, 1),  // k=21
+    fpext_t(0xd6e83bc66ca3866full, 0x00000000, -170, 0),  // k=20
+    fpext_t(0xbe06b6ca0e2bf0bbull, 0x00000000, -159, 1),  // k=19
+    fpext_t(0x98a4ad99c8d68b16ull, 0x00000000, -148, 0),  // k=18
+    fpext_t(0xdcf9a6db1c7cefc4ull, 0x00000000, -138, 1),  // k=17
+    fpext_t(0x8e8bbc4d72f6e4f3ull, 0x00000000, -127, 0),  // k=16
+    fpext_t(0xa3f329bdcad4f3a4ull, 0x00000000, -117, 1),  // k=15
+    fpext_t(0xa67ff033c66e51d5ull, 0x00000000, -107, 0),  // k=14
+    fpext_t(0x95eee36cc5577b91ull, 0x00000000, -97, 1),   // k=13
+    fpext_t(0xee2308c314ef1e8full, 0x00000000, -88, 0),   // k=12
+    fpext_t(0xa28cd1f08aab6e16ull, 0x00000000, -78, 1),   // k=11
+    fpext_t(0xbf5cd0b1cd6d0eaaull, 0x00000000, -69, 0),   // k=10
+    fpext_t(0xbc7c9b96b6c98e30ull, 0x00000000, -60, 1),   // k=9
+    fpext_t(0x9939f56a059c5d70ull, 0x00000000, -51, 0),   // k=8
+    fpext_t(0xcd0e8b3a32fae650ull, 0x00000000, -43, 1),   // k=7
+    fpext_t(0xddcf30bf57dc23a0ull, 0x00000000, -35, 0),   // k=6
+    fpext_t(0xb8ef1d2ab6399c7dull, 0x00000000, -27, 1),   // k=5
+    fpext_t(0xe860521f6b1ea4d2ull, 0x00000000, -21, 0),   // k=4 ~ 2.4e-7
+    fpext_t(0xd00d00d00d00d00dull, 0x00000000, -15, 1),   // k=3 ~ -2.5e-5
+    fpext_t(0xb60b60b60b60b60bull, 0x00000000, -10, 0),   // k=2  1/24
+    fpext_t(0x8000000000000000ull, 0x00000000, -1, 1),    // k=1 -1/2
+    fpext_t(0x8000000000000000ull, 0x00000000, 0, 0),     // k=0  1
+};
+
+// Evaluate sin(y) for |y| ≤ π/4 via Taylor (Horner on z = y²).
+inline fpext_t taylor_sin(fpext_t const &y)
+{
+    fpext_t z = y * y;
+    fpext_t p = SIN_T[0];
+    for (size_t i = 1; i < SIN_T.size(); i++) p = p * z + SIN_T[i];
+    return y * p;
+}
+
+inline fpext_t taylor_cos(fpext_t const &y)
+{
+    fpext_t z = y * y;
+    fpext_t p = COS_T[0];
+    for (size_t i = 1; i < COS_T.size(); i++) p = p * z + COS_T[i];
+    return p;
+}
+
+// Range-reduce x to (quadrant, y) where x = quadrant * (π/2) + y and
+// |y| ≤ π/4 (approximately). Returns the quadrant (0..3).
+// Limited precision: works well for |x| ≤ ~2^60. Beyond that the
+// caller should detect via the 2^63 check and bail.
+inline int range_reduce(fp80_t const &src, fpext_t &y_out)
+{
+    static const fpext_t pio2(0xc90fdaa22168c234ull, 0xc4c6628c, 0, 0);
+    static const fp80_t pio2_fp80(0xc90fdaa22168c235ull, 0x3FFF);
+
+    // n = round(src / (π/2))
+    fp80_t recip_pio2;
+    fp80_t one = fp80_t::const_one();
+    fp80_t::x87_fdivr(one, pio2_fp80, recip_pio2);   // 2/π
+    fp80_t scaled;
+    fp80_t::x87_fmul(src, recip_pio2, scaled);
+    // Round to nearest integer
+    fp80_t rounded;
+    {
+        fpround_t r(X87CW_ROUNDING_NEAREST);
+        fp80_t::x87_frndint(scaled, rounded);
+    }
+    int64_t n;
+    if ((rounded.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS > 62)
+        n = (rounded.sign() ? INT64_MIN : INT64_MAX);
+    else
+    {
+        int exp = (rounded.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+        if (exp < 0)
+            n = 0;
+        else
+            n = int64_t(rounded.mantissa() >> (63 - exp)) * (rounded.sign() ? -1 : 1);
+    }
+
+    // y = src - n * (π/2), in fpext96_t.
+    fpext_t n_ext;
+    if (n == 0)
+        n_ext = fpext_t::zero;
+    else
+    {
+        bool neg = n < 0;
+        uint64_t a = neg ? -(uint64_t)n : (uint64_t)n;
+        int sh = count_leading_zeros64(a);
+        n_ext = fpext_t(a << sh, 0, 63 - sh, neg ? 1 : 0);
+    }
+    fpext_t shift = n_ext * pio2;
+    fpext_t src_ext(src);
+    y_out.sub(src_ext, shift);
+
+    return int(n & 3);
+}
+
+}  // anonymous namespace
+
+uint16_t fp80_t::x87_fsin(fp80_t const &src, fp80_t &dst)
+{
+    uint16_t flags = src.isdenorm() ? X87SW_DENORM_EX : 0;
+    if (src.isnan())
+    {
+        dst = src.issnan() ? fp80_t::make_qnan(src) : src;
+        return src.issnan() ? X87SW_INVALID_EX : 0;
+    }
+    if (src.isinf())
+    {
+        dst = fp80_t::const_indef();
+        return X87SW_INVALID_EX;
+    }
+    if (src.iszero())
+    {
+        dst = src;
+        return 0;
+    }
+    // |src| > 2^63 → out of range, set C2, return src unchanged.
+    if ((src.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS > 62)
+    {
+        dst = src;
+        return flags | X87SW_C2;
+    }
+
+    fpext_t y;
+    int q = range_reduce(src, y);
+    fpext_t r;
+    switch (q & 3)
+    {
+        case 0: r = taylor_sin(y); break;
+        case 1: r = taylor_cos(y); break;
+        case 2: r = taylor_sin(y); r.chs(); break;
+        case 3: r = taylor_cos(y); r.chs(); break;
+    }
+    dst = round_fpext96_to_fp80(r, read_x87_cw(), flags);
+    flags |= X87SW_PRECISION_EX | X87SW_C1;
+    return flags;
+}
+
+uint16_t fp80_t::x87_fcos(fp80_t const &src, fp80_t &dst)
+{
+    uint16_t flags = src.isdenorm() ? X87SW_DENORM_EX : 0;
+    if (src.isnan())
+    {
+        dst = src.issnan() ? fp80_t::make_qnan(src) : src;
+        return src.issnan() ? X87SW_INVALID_EX : 0;
+    }
+    if (src.isinf())
+    {
+        dst = fp80_t::const_indef();
+        return X87SW_INVALID_EX;
+    }
+    if (src.iszero())
+    {
+        dst = fp80_t::const_one();
+        return 0;
+    }
+    if ((src.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS > 62)
+    {
+        dst = src;
+        return flags | X87SW_C2;
+    }
+
+    fpext_t y;
+    int q = range_reduce(src, y);
+    fpext_t r;
+    // cos(x + qπ/2): q=0 cos(y), q=1 -sin(y), q=2 -cos(y), q=3 sin(y)
+    switch (q & 3)
+    {
+        case 0: r = taylor_cos(y); break;
+        case 1: r = taylor_sin(y); r.chs(); break;
+        case 2: r = taylor_cos(y); r.chs(); break;
+        case 3: r = taylor_sin(y); break;
+    }
+    dst = round_fpext96_to_fp80(r, read_x87_cw(), flags);
+    flags |= X87SW_PRECISION_EX | X87SW_C1;
+    return flags;
+}
 uint16_t fp80_t::x87_fsincos(fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return via_fp64_unary2(a, d1, d2, &fp64_t::x87_fsincos); }
 uint16_t fp80_t::x87_fptan  (fp80_t const &a, fp80_t &d1, fp80_t &d2)       { return via_fp64_unary2(a, d1, d2, &fp64_t::x87_fptan); }
 #endif
