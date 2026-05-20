@@ -1329,6 +1329,18 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
         return flags;
     }
 
+    // For |src1| outside Cephes' fast-converging range (~|s| < 0.4), the
+    // direct (x/(x+2)) Maclaurin series converges too slowly. Dispatch to
+    // fyl2x(1 + src1, src2) which uses the well-conditioned (m-1)/(m+1)
+    // path on the renormalized mantissa.
+    int src1_exp = (src1.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+    if (src1_exp > -2)   // |src1| > ~0.25
+    {
+        fp80_t one_plus_x;
+        fp80_t::x87_fadd(src1, fp80_t::const_one(), one_plus_x);
+        return x87_fyl2x(one_plus_x, src2, dst);
+    }
+
     // log(1 + x) via the (1+x - 1) / (1+x + 1) = x/(x+2) substitution.
     fp80_t two_fp80(0x8000000000000000ull, 0x4000);   // 2.0
     fp80_t denom_fp80;
