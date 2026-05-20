@@ -1370,7 +1370,9 @@ uint16_t fp80_t::x87_fsin(fp80_t const &src, fp80_t &dst)
         case 3: r = taylor_cos(y); r.chs(); break;
     }
     dst = round_fpext96_to_fp80(r, read_x87_cw(), flags);
-    flags |= X87SW_PRECISION_EX | X87SW_C1;
+    flags |= X87SW_PRECISION_EX;
+    if (dst.isdenorm() || dst.iszero())
+        flags |= X87SW_UNDERFLOW_EX;
     return flags;
 }
 
@@ -1410,7 +1412,9 @@ uint16_t fp80_t::x87_fcos(fp80_t const &src, fp80_t &dst)
         case 3: r = taylor_sin(y); break;
     }
     dst = round_fpext96_to_fp80(r, read_x87_cw(), flags);
-    flags |= X87SW_PRECISION_EX | X87SW_C1;
+    flags |= X87SW_PRECISION_EX;
+    if (dst.isdenorm() || dst.iszero())
+        flags |= X87SW_UNDERFLOW_EX;
     return flags;
 }
 uint16_t fp80_t::x87_fsincos(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
@@ -1456,7 +1460,10 @@ uint16_t fp80_t::x87_fsincos(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
     uint16_t f1 = flags, f2 = flags;
     dst1 = round_fpext96_to_fp80(cos_r, read_x87_cw(), f1);
     dst2 = round_fpext96_to_fp80(sin_r, read_x87_cw(), f2);
-    return flags | X87SW_PRECISION_EX | X87SW_C1;
+    flags |= X87SW_PRECISION_EX;
+    if (dst1.isdenorm() || dst1.iszero() || dst2.isdenorm() || dst2.iszero())
+        flags |= X87SW_UNDERFLOW_EX;
+    return flags;
 }
 
 uint16_t fp80_t::x87_fptan(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
@@ -1508,7 +1515,10 @@ uint16_t fp80_t::x87_fptan(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
     fp80_t::x87_fdivr(sin80, cos80, tan80);   // tan = sin/cos
     dst1 = fp80_t::const_one();
     dst2 = tan80;
-    return flags | X87SW_PRECISION_EX | X87SW_C1;
+    flags |= X87SW_PRECISION_EX;
+    if (tan80.isdenorm() || tan80.iszero())
+        flags |= X87SW_UNDERFLOW_EX;
+    return flags;
 }
 #endif
 #if X87_HOST_HAS_FP80
