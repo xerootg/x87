@@ -943,9 +943,10 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
             dst = fp80_t::const_indef();
             return X87SW_INVALID_EX;
         }
-        // -inf * src2 → signed inf, divzero flag
+        // -inf * src2 → signed inf, divzero flag. Don't propagate DE here;
+        // x87 reports only #Z for this case even if src2 is denormal.
         dst = (src2.sign() == 0) ? fp80_t::const_ninf() : fp80_t::const_pinf();
-        return flags | X87SW_DIVZERO_EX;
+        return X87SW_DIVZERO_EX;
     }
     if (src2.ismaxexp())
     {
@@ -966,12 +967,13 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     }
     if (src2.iszero())
     {
-        // src2 = 0, src1 finite >0. log2(src1) is finite (or -inf if src1=0 but
-        // we already handled that). 0 * finite = 0, with sign from log2(src1).
-        // log2(1) = 0 too. So result is signed zero based on quadrant.
-        bool src1_gt_1 = (src1.sign_exp() > 0x3FFF) ||
-                         (src1.sign_exp() == 0x3FFF && src1.mantissa() > FP80_EXPLICIT_ONE);
-        bool log_neg = !src1_gt_1;
+        // src2 = 0, src1 finite >0. 0 * log2(src1) = 0, signed based on
+        // whether log2(src1) is negative (for src1 strictly < 1) and src2's
+        // sign. For src1 == 1, log2(1) = +0, so result = +0 * src2 = signed
+        // by src2 only.
+        bool src1_lt_1 = (src1.sign_exp() < 0x3FFF) ||
+                         (src1.sign_exp() == 0x3FFF && src1.mantissa() < FP80_EXPLICIT_ONE);
+        bool log_neg = src1_lt_1;
         bool result_neg = log_neg ^ (src2.sign() != 0);
         dst = result_neg ? fp80_t::const_nzero() : fp80_t::const_zero();
         return flags;
@@ -1074,6 +1076,14 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
         if (src1.isnan()) dst = src1.issnan() ? fp80_t::make_qnan(src1) : src1;
         else              dst = src2.issnan() ? fp80_t::make_qnan(src2) : src2;
         return snan ? X87SW_INVALID_EX : 0;
+    }
+    // src2 = 0 (multiplier zero): x87 returns signed 0 without checking
+    // src1's domain. Sign per (src2 ^ src1).
+    if (src2.iszero() && !src1.ismaxexp())
+    {
+        bool result_neg = (src2.sign() != 0) ^ (src1.sign() != 0);
+        dst = result_neg ? fp80_t::const_nzero() : fp80_t::const_zero();
+        return flags;
     }
     // src1 = -inf or src1 < -1 → indef (log of negative).
     if (src1.ismaxexp() && src1.sign())
