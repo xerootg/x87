@@ -339,6 +339,7 @@ using fpextfast_t = fpext64_t;
         }
         uint16_t flags = X87SW_PRECISION_EX;
         dst = round_fpext96_to_fp80(g * h + g + h, read_x87_cw(), flags);
+        if (dst.isdenorm() || dst.iszero()) flags |= X87SW_UNDERFLOW_EX;
         return flags;
     }
 
