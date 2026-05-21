@@ -22,15 +22,15 @@ Matching Intel x87 hardware bit-exactly (mantissa + full status word) across the
 | Constants, comparisons, FXAM, FTST, FXTRACT, FRNDINT, FLOOR/CEIL, ABS/CHS, copysign/samesign, NaN helpers | 100% |
 | FADD / FSUB / FSUBR / FMUL / FDIV / FDIVR | 100% |
 | FSCALE / FPREM / FPREM1 | 100% |
-| FYL2X | 92% |
+| FYL2X | 93% |
 | FSQRT | 82% |
 | FSIN / FCOS | ~80% |
 | F2XM1 | 79% |
 | FPATAN | 77% |
 | FPTAN / FSINCOS | ~62% per output |
-| FYL2XP1 | 54% |
+| FYL2XP1 | 55% |
 
-The transcendentals' remaining gaps are confined to the C1 (rounding-direction) status word bit — the mantissa values match Intel hardware in nearly every test case. Closing those gaps requires extending the internal precision in `x87fpext.h` beyond the current 64+32 = 96 bits (the `fpext96_t` type) so that polynomial Taylor/Horner intermediates retain enough precision for the C1 bit to emerge from rounding rather than from heuristics.
+The transcendentals' remaining gaps are almost entirely in the C1 (rounding-direction) status word bit — the mantissa values match Intel hardware in nearly every test case. Empirical investigation showed that higher internal precision (the `fpext128_t` template, with 64+64 = 128 mantissa+ext bits) actually *regresses* the C1 match because Intel's microcode uses a specific internal precision and polynomial evaluation chain that we can match approximately but not byte-exactly through software. The split-form polynomial sin(y) = y + y·(z·P(z)) used in `taylor_sin/taylor_cos` was derived empirically by probing Intel x87 — it matches native fp80 hardware 96% bit-exact, though our hand-rolled fp80 multiply chain diverges in the LSBs.
 
 ## Building and testing
 
