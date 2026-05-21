@@ -200,9 +200,10 @@ template<typename ExtendedType>
 class fpextxx_t
 {
     //
-    // ExtendedType can be uint8_t (no extension), uint16_t or uint32_t
+    // ExtendedType can be uint8_t (no extension), uint16_t, uint32_t, or
+    // uint64_t (the last giving 128-bit total precision: fpext128_t).
     //
-    static_assert(sizeof(ExtendedType) <= 4);
+    static_assert(sizeof(ExtendedType) <= 8);
 
     //
     // bit of a kludge, but treat ExtendedType of less than 16 bits as none
@@ -238,7 +239,25 @@ public:
     //
     constexpr explicit fpextxx_t(mantissa_t high, uint32_t low, exponent_t exp, sign_t sign) :
         m_mantissa(high + (EXTENDED ? 0 : (low >> 31))),
-        m_extend((EXTEND_BITS == 32) ? low : (EXTEND_BITS == 16) ? ((low >> 16) + ((low >> 15) & 1)) : 0),
+        m_extend(EXTEND_BITS == 64 ? (extend_t(low) << 32) :
+                 EXTEND_BITS == 32 ? extend_t(low) :
+                 EXTEND_BITS == 16 ? extend_t((low >> 16) + ((low >> 15) & 1)) : 0),
+        m_exponent(exp),
+        m_sign(sign)
+    {
+    }
+
+    // Tag for 64-bit-low constructor.
+    struct low64_tag {};
+
+    // For fpext128_t constants where the bottom 64 bits matter, accept a
+    // 64-bit low via the tagged form. (Existing callers using uint32_t low
+    // are unaffected.)
+    constexpr explicit fpextxx_t(mantissa_t high, uint64_t low64, exponent_t exp, sign_t sign, low64_tag) :
+        m_mantissa(high + (EXTENDED ? 0 : (low64 >> 63))),
+        m_extend(EXTEND_BITS == 64 ? extend_t(low64) :
+                 EXTEND_BITS == 32 ? extend_t(low64 >> 32) :
+                 EXTEND_BITS == 16 ? extend_t(low64 >> 48) : 0),
         m_exponent(exp),
         m_sign(sign)
     {
@@ -367,54 +386,57 @@ private:
 //
 using fpext64_t = fpextxx_t<uint8_t>;
 using fpext96_t = fpextxx_t<uint32_t>;
+using fpext128_t = fpextxx_t<uint64_t>;
 
 
 
 //
-// constants
+// constants — `inline` (C++17) gives these vague linkage so the linker
+// collapses duplicate definitions across translation units that include
+// this header.
 //
-fpext52_t const fpext52_t::zero (0x0000000000000000ull, 0x00000000, fpext52_t::EXPONENT_MIN, 0);
-fpext52_t const fpext52_t::nzero(0x0000000000000000ull, 0x00000000, fpext52_t::EXPONENT_MIN, 1);
-fpext52_t const fpext52_t::one  (0x8000000000000000ull, 0x00000000,  0, 0);
-fpext52_t const fpext52_t::none (0x8000000000000000ull, 0x00000000,  0, 1);
-fpext52_t const fpext52_t::l2t  (0xd49a784bcd1b8afeull, 0x492bf6ff,  1, 0);
-fpext52_t const fpext52_t::l2e  (0xb8aa3b295c17f0bbull, 0xbe87fed0,  0, 0);
-fpext52_t const fpext52_t::pi   (0xc90fdaa22168c234ull, 0xc4c6628c,  1, 0);
-fpext52_t const fpext52_t::pio2 (0xc90fdaa22168c234ull, 0xc4c6628c,  0, 0);
-fpext52_t const fpext52_t::pio4 (0xc90fdaa22168c234ull, 0xc4c6628c, -1, 0);
-fpext52_t const fpext52_t::lg2  (0x9a209a84fbcff798ull, 0x8f8959ac, -2, 0);
-fpext52_t const fpext52_t::ln2  (0xb17217f7d1cf79abull, 0xc9e3b398, -1, 0);
+inline fpext52_t const fpext52_t::zero (0x0000000000000000ull, 0x00000000, fpext52_t::EXPONENT_MIN, 0);
+inline fpext52_t const fpext52_t::nzero(0x0000000000000000ull, 0x00000000, fpext52_t::EXPONENT_MIN, 1);
+inline fpext52_t const fpext52_t::one  (0x8000000000000000ull, 0x00000000,  0, 0);
+inline fpext52_t const fpext52_t::none (0x8000000000000000ull, 0x00000000,  0, 1);
+inline fpext52_t const fpext52_t::l2t  (0xd49a784bcd1b8afeull, 0x492bf6ff,  1, 0);
+inline fpext52_t const fpext52_t::l2e  (0xb8aa3b295c17f0bbull, 0xbe87fed0,  0, 0);
+inline fpext52_t const fpext52_t::pi   (0xc90fdaa22168c234ull, 0xc4c6628c,  1, 0);
+inline fpext52_t const fpext52_t::pio2 (0xc90fdaa22168c234ull, 0xc4c6628c,  0, 0);
+inline fpext52_t const fpext52_t::pio4 (0xc90fdaa22168c234ull, 0xc4c6628c, -1, 0);
+inline fpext52_t const fpext52_t::lg2  (0x9a209a84fbcff798ull, 0x8f8959ac, -2, 0);
+inline fpext52_t const fpext52_t::ln2  (0xb17217f7d1cf79abull, 0xc9e3b398, -1, 0);
 
-template<> fpext64_t const fpext64_t::zero (0x0000000000000000ull, 0x00000000, fpext64_t::EXPONENT_MIN, 0);
-template<> fpext64_t const fpext64_t::nzero(0x0000000000000000ull, 0x00000000, fpext64_t::EXPONENT_MIN, 1);
-template<> fpext64_t const fpext64_t::one  (0x8000000000000000ull, 0x00000000,  0, 0);
-template<> fpext64_t const fpext64_t::none (0x8000000000000000ull, 0x00000000,  0, 1);
-template<> fpext64_t const fpext64_t::l2t  (0xd49a784bcd1b8afeull, 0x492bf6ff,  1, 0);
-template<> fpext64_t const fpext64_t::l2e  (0xb8aa3b295c17f0bbull, 0xbe87fed0,  0, 0);
-template<> fpext64_t const fpext64_t::pi   (0xc90fdaa22168c234ull, 0xc4c6628c,  1, 0);
-template<> fpext64_t const fpext64_t::pio2 (0xc90fdaa22168c234ull, 0xc4c6628c,  0, 0);
-template<> fpext64_t const fpext64_t::pio4 (0xc90fdaa22168c234ull, 0xc4c6628c, -1, 0);
-template<> fpext64_t const fpext64_t::lg2  (0x9a209a84fbcff798ull, 0x8f8959ac, -2, 0);
-template<> fpext64_t const fpext64_t::ln2  (0xb17217f7d1cf79abull, 0xc9e3b398, -1, 0);
+template<> inline fpext64_t const fpext64_t::zero (0x0000000000000000ull, 0x00000000, fpext64_t::EXPONENT_MIN, 0);
+template<> inline fpext64_t const fpext64_t::nzero(0x0000000000000000ull, 0x00000000, fpext64_t::EXPONENT_MIN, 1);
+template<> inline fpext64_t const fpext64_t::one  (0x8000000000000000ull, 0x00000000,  0, 0);
+template<> inline fpext64_t const fpext64_t::none (0x8000000000000000ull, 0x00000000,  0, 1);
+template<> inline fpext64_t const fpext64_t::l2t  (0xd49a784bcd1b8afeull, 0x492bf6ff,  1, 0);
+template<> inline fpext64_t const fpext64_t::l2e  (0xb8aa3b295c17f0bbull, 0xbe87fed0,  0, 0);
+template<> inline fpext64_t const fpext64_t::pi   (0xc90fdaa22168c234ull, 0xc4c6628c,  1, 0);
+template<> inline fpext64_t const fpext64_t::pio2 (0xc90fdaa22168c234ull, 0xc4c6628c,  0, 0);
+template<> inline fpext64_t const fpext64_t::pio4 (0xc90fdaa22168c234ull, 0xc4c6628c, -1, 0);
+template<> inline fpext64_t const fpext64_t::lg2  (0x9a209a84fbcff798ull, 0x8f8959ac, -2, 0);
+template<> inline fpext64_t const fpext64_t::ln2  (0xb17217f7d1cf79abull, 0xc9e3b398, -1, 0);
 
-template<> fpext96_t const fpext96_t::zero (0x0000000000000000ull, 0x00000000, fpext96_t::EXPONENT_MIN, 0);
-template<> fpext96_t const fpext96_t::nzero(0x0000000000000000ull, 0x00000000, fpext96_t::EXPONENT_MIN, 1);
-template<> fpext96_t const fpext96_t::one  (0x8000000000000000ull, 0x00000000,  0, 0);
-template<> fpext96_t const fpext96_t::none (0x8000000000000000ull, 0x00000000,  0, 1);
-template<> fpext96_t const fpext96_t::l2t  (0xd49a784bcd1b8afeull, 0x492bf6ff,  1, 0);
-template<> fpext96_t const fpext96_t::l2e  (0xb8aa3b295c17f0bbull, 0xbe87fed0,  0, 0);
-template<> fpext96_t const fpext96_t::pi   (0xc90fdaa22168c234ull, 0xc4c6628c,  1, 0);
-template<> fpext96_t const fpext96_t::pio2 (0xc90fdaa22168c234ull, 0xc4c6628c,  0, 0);
-template<> fpext96_t const fpext96_t::pio4 (0xc90fdaa22168c234ull, 0xc4c6628c, -1, 0);
-template<> fpext96_t const fpext96_t::lg2  (0x9a209a84fbcff798ull, 0x8f8959ac, -2, 0);
-template<> fpext96_t const fpext96_t::ln2  (0xb17217f7d1cf79abull, 0xc9e3b398, -1, 0);
+template<> inline fpext96_t const fpext96_t::zero (0x0000000000000000ull, 0x00000000, fpext96_t::EXPONENT_MIN, 0);
+template<> inline fpext96_t const fpext96_t::nzero(0x0000000000000000ull, 0x00000000, fpext96_t::EXPONENT_MIN, 1);
+template<> inline fpext96_t const fpext96_t::one  (0x8000000000000000ull, 0x00000000,  0, 0);
+template<> inline fpext96_t const fpext96_t::none (0x8000000000000000ull, 0x00000000,  0, 1);
+template<> inline fpext96_t const fpext96_t::l2t  (0xd49a784bcd1b8afeull, 0x492bf6ff,  1, 0);
+template<> inline fpext96_t const fpext96_t::l2e  (0xb8aa3b295c17f0bbull, 0xbe87fed0,  0, 0);
+template<> inline fpext96_t const fpext96_t::pi   (0xc90fdaa22168c234ull, 0xc4c6628c,  1, 0);
+template<> inline fpext96_t const fpext96_t::pio2 (0xc90fdaa22168c234ull, 0xc4c6628c,  0, 0);
+template<> inline fpext96_t const fpext96_t::pio4 (0xc90fdaa22168c234ull, 0xc4c6628c, -1, 0);
+template<> inline fpext96_t const fpext96_t::lg2  (0x9a209a84fbcff798ull, 0x8f8959ac, -2, 0);
+template<> inline fpext96_t const fpext96_t::ln2  (0xb17217f7d1cf79abull, 0xc9e3b398, -1, 0);
 
 
 
 //
 // construct an fpex52_t from high-precision components
 //
-fpext52_t::fpext52_t(uint64_t high, uint32_t low, int32_t exponent, uint16_t sign)
+inline fpext52_t::fpext52_t(uint64_t high, uint32_t low, int32_t exponent, uint16_t sign)
 {
     int32_t exp = exponent + FP64_EXPONENT_BIAS;
 
@@ -1203,6 +1225,80 @@ inline void fpextxx_t<uint8_t>::mul(fpextxx_t const &a, fpextxx_t const &b)
         m_mantissa = hi + ((lo >> 63) & 1), m_exponent += 1;
 
     // double check to be sure we ended up as expected
+    x87_assert((m_mantissa & EXPLICIT_ONE) != 0);
+}
+
+//
+// fpext128_t multiply: full 128x128 -> 256-bit intermediate, retaining
+// the top 128 bits as result and using the next bits for proper round-
+// to-nearest-even.
+//
+template<>
+inline void fpextxx_t<uint64_t>::mul(fpextxx_t const &a, fpextxx_t const &b)
+{
+    m_sign = a.m_sign ^ b.m_sign;
+    if (a.iszero() || b.iszero())
+    {
+        m_exponent = EXPONENT_MIN;
+        m_mantissa = 0;
+        m_extend = 0;
+        return;
+    }
+
+    // Schoolbook 128x128 -> 256 with four 64x64 partial products.
+    // A = a.m_mantissa : a.m_extend  (high : low)
+    // B = b.m_mantissa : b.m_extend
+    auto [pp_lo, pp_hi] = multiply_64x64(a.m_mantissa, b.m_mantissa); // top
+    auto [mE_lo, mE_hi] = multiply_64x64(a.m_mantissa, b.m_extend);
+    auto [eM_lo, eM_hi] = multiply_64x64(a.m_extend,   b.m_mantissa);
+    auto [ee_lo, ee_hi] = multiply_64x64(a.m_extend,   b.m_extend);   // bottom
+
+    // Accumulator layout (each tN is 64 bits):
+    //   t3 (bits 192..255) = pp_hi + carries
+    //   t2 (bits 128..191) = pp_lo + mE_hi + eM_hi
+    //   t1 (bits  64..127) = mE_lo + eM_lo + ee_hi
+    //   t0 (bits   0..63 ) = ee_lo
+    uint64_t t0 = ee_lo;
+    uint64_t t1 = mE_lo;
+    uint64_t carry_t1 = 0;
+    t1 += eM_lo; if (t1 < eM_lo) carry_t1++;
+    t1 += ee_hi; if (t1 < ee_hi) carry_t1++;
+
+    uint64_t t2 = pp_lo;
+    uint64_t carry_t2 = 0;
+    t2 += mE_hi;     if (t2 < mE_hi)     carry_t2++;
+    t2 += eM_hi;     if (t2 < eM_hi)     carry_t2++;
+    t2 += carry_t1;  if (t2 < carry_t1)  carry_t2++;
+
+    uint64_t t3 = pp_hi + carry_t2;
+
+    m_exponent = a.m_exponent + b.m_exponent;
+
+    // Normalize: result starts in t3:t2 (with t1:t0 as residue).
+    // Mantissas in [2^63, 2^64) → 128-bit values in [2^127, 2^128). Their
+    // product is in [2^254, 2^256), so t3's bit 63 is either set (no
+    // normalization) or one below (need to shift left by 1).
+    bool round_bit, sticky;
+    if ((t3 & EXPLICIT_ONE) == 0)
+    {
+        // Shift everything left by 1.
+        m_mantissa = (t3 << 1) | (t2 >> 63);
+        m_extend   = (t2 << 1) | (t1 >> 63);
+        round_bit  = (t1 >> 62) & 1;
+        sticky     = ((t1 & ((1ull << 62) - 1)) != 0) || (t0 != 0);
+    }
+    else
+    {
+        m_mantissa = t3;
+        m_extend   = t2;
+        m_exponent += 1;
+        round_bit  = (t1 >> 63) & 1;
+        sticky     = ((t1 & ((1ull << 63) - 1)) != 0) || (t0 != 0);
+    }
+    // Round-to-nearest-even at the boundary below m_extend's LSB.
+    if (round_bit && (sticky || (m_extend & 1)))
+        this->round_extend_up();
+
     x87_assert((m_mantissa & EXPLICIT_ONE) != 0);
 }
 
