@@ -986,27 +986,23 @@ static uint16_t host_x87_sqrt(fp80_t const &a, fp80_t &dst)
 //
 // 'subtract' inverts b's sign before adding.
 //
+static uint16_t propagate_nan_pair(fp80_t a, fp80_t b, fp80_t &dst)
+{
+    bool snan = a.issnan() || b.issnan();
+    fp80_t pick;
+    if (a.isnan() && b.isnan())
+        pick = (b.mantissa() > a.mantissa()) ? b : a;
+    else
+        pick = a.isnan() ? a : b;
+    dst = pick.issnan() ? fp80_t::make_qnan(pick) : pick;
+    return snan ? X87SW_INVALID_EX : 0;
+}
+
 static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
 {
     // NaN check before sign flip — subtract shouldn't change a NaN's sign.
     if (a.isnan() || b.isnan())
-    {
-        bool snan = a.issnan() || b.issnan();
-        fp80_t pick;
-        if (a.isnan() && b.isnan())
-        {
-            // x87 picks the NaN with the larger significand (Intel SDM,
-            // §8.2.2 NaN propagation: "the NaN with the largest mantissa
-            // is returned" for binary ops).
-            pick = (b.mantissa() > a.mantissa()) ? b : a;
-        }
-        else
-        {
-            pick = a.isnan() ? a : b;
-        }
-        dst = pick.issnan() ? fp80_t::make_qnan(pick) : pick;
-        return snan ? X87SW_INVALID_EX : 0;
-    }
+        return propagate_nan_pair(a, b, dst);
     if (subtract) b = fp80_t::chs(b);
     if (a.isinf() && b.isinf())
     {
@@ -1147,12 +1143,7 @@ static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
 static uint16_t do_mul(fp80_t a, fp80_t b, fp80_t &dst)
 {
     if (a.isnan() || b.isnan())
-    {
-        bool snan = a.issnan() || b.issnan();
-        if (a.isnan()) dst = a.issnan() ? fp80_t::make_qnan(a) : a;
-        else           dst = b.issnan() ? fp80_t::make_qnan(b) : b;
-        return snan ? X87SW_INVALID_EX : 0;
-    }
+        return propagate_nan_pair(a, b, dst);
     bool a_inf = a.isinf(), b_inf = b.isinf();
     bool a_zero = a.iszero(), b_zero = b.iszero();
     if ((a_inf && b_zero) || (a_zero && b_inf))
@@ -1228,12 +1219,7 @@ static uint16_t do_mul(fp80_t a, fp80_t b, fp80_t &dst)
 static uint16_t do_div(fp80_t a, fp80_t b, fp80_t &dst)
 {
     if (a.isnan() || b.isnan())
-    {
-        bool snan = a.issnan() || b.issnan();
-        if (a.isnan()) dst = a.issnan() ? fp80_t::make_qnan(a) : a;
-        else           dst = b.issnan() ? fp80_t::make_qnan(b) : b;
-        return snan ? X87SW_INVALID_EX : 0;
-    }
+        return propagate_nan_pair(a, b, dst);
     bool a_inf = a.isinf(), b_inf = b.isinf();
     bool a_zero = a.iszero(), b_zero = b.iszero();
     if ((a_inf && b_inf) || (a_zero && b_zero))
