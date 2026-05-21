@@ -1495,8 +1495,16 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
     static fpext_t const c1_19(0xd79435e50d79435eull, 0x50d79435, -5, 0);
     static fpext_t const c1_21(0xc30c30c30c30c30cull, 0x30c30c30, -5, 0);
     static fpext_t const c1_23(0xb21642c8590b2164ull, 0x2c8590b2, -5, 0);
+    static fpext_t const c1_25(0xa3d70a3d70a3d70aull, 0x3d70a3d7, -5, 0);
+    static fpext_t const c1_27(0x97b425ed097b425eull, 0xd097b426, -5, 0);
+    static fpext_t const c1_29(0x8d3dcb08d3dcb08dull, 0x3dcb08d4, -5, 0);
+    static fpext_t const c1_31(0x8421084210842108ull, 0x42108421, -5, 0);
 
-    fpext_t poly = c1_23 * s2 + c1_21;
+    fpext_t poly = c1_31 * s2 + c1_29;
+    poly = poly * s2 + c1_27;
+    poly = poly * s2 + c1_25;
+    poly = poly * s2 + c1_23;
+    poly = poly * s2 + c1_21;
     poly = poly * s2 + c1_19;
     poly = poly * s2 + c1_17;
     poly = poly * s2 + c1_15;
