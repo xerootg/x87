@@ -1322,6 +1322,8 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
 
     flags |= X87SW_PRECISION_EX;
     dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
+    if (dst.isdenorm() && !dst.iszero())
+        flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
     return flags;
 }
 
