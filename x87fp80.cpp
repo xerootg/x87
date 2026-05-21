@@ -688,29 +688,82 @@ fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &out_sw)
     }
     if (biased <= 0)
     {
-        // Denormalize: shift mantissa right. Underflow is reported only if
-        // any bits are lost in the shift (i.e., the denormal result is
-        // inexact); otherwise just emit the exact denormal.
-        int shift = 1 - biased;
+        // Denormal result. The earlier primary rounding may have set C1 and
+        // PE for a normal-precision rounding decision that is irrelevant
+        // here. Reroll the rounding decision at the *combined* precision —
+        // PC drop bits plus denorm shift bits — using the original mantissa
+        // and extension. This is the proper single-step round per IEEE-754.
+        int shift = 1 - (v.exponent() + FP80_EXPONENT_BIAS);
+        uint64_t orig_mant = v.mantissa();
+        uint32_t orig_ext  = v.extend();
+        // Clear C1 / PE / UE flags we may have set during the normal-path
+        // rounding above — we are about to redo them.
+        out_sw &= ~(X87SW_C1 | X87SW_PRECISION_EX | X87SW_UNDERFLOW_EX);
         if (shift >= 64)
         {
-            out_sw |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
-            out_sw &= ~X87SW_C1;          // no upward direction when going to 0
+            // Result rounds to a denormal whose magnitude is below 2^(emin-63).
+            // For round-to-nearest-zero / truncation modes the result is 0.
+            // For directed rounding "away from zero", the result is the
+            // smallest denormal.
+            bool any_bits = (orig_mant != 0) || (orig_ext != 0);
+            if (any_bits)
+                out_sw |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+            bool away =
+                (rmode == X87CW_ROUNDING_UP && !neg) ||
+                (rmode == X87CW_ROUNDING_DOWN && neg);
+            if (away && any_bits)
+            {
+                out_sw |= X87SW_C1;
+                return fp80_t(1, sign_bit);
+            }
             return fp80_t(0, sign_bit);
         }
-        uint64_t lost_mask = (1ull << shift) - 1;
-        bool denorm_inexact = (mant & lost_mask) != 0;
-        uint64_t result_mant = mant >> shift;
-        if (denorm_inexact)
-            out_sw |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
-        // If already inexact from primary rounding, UE fires too.
-        if (out_sw & X87SW_PRECISION_EX)
-            out_sw |= X87SW_UNDERFLOW_EX;
-        // If primary rounding rounded up at a bit below the denorm-shift cut,
-        // the bump fell off — the final mantissa equals the truncated value,
-        // so C1 should not flag a round-up.
-        if (round_up && drop_in_mant < shift)
-            out_sw &= ~X87SW_C1;
+        int combined_drop = drop_in_mant + shift;
+        // Round / sticky at the combined boundary.  The "round bit" is at
+        // position (combined_drop - 1) of the 96-bit conceptual value where
+        // bits 32..95 are orig_mant and bits 0..31 are orig_ext.
+        auto bit_at = [&](int pos) -> bool {
+            if (pos < 0)  return false;
+            if (pos < 32) return (orig_ext >> pos) & 1;
+            if (pos < 96) return (orig_mant >> (pos - 32)) & 1;
+            return false;
+        };
+        int round_pos = combined_drop - 1 + 32;          // -1 from "below LSB"
+        int lsb_pos   = combined_drop + 32;
+        bool d_round  = bit_at(round_pos);
+        bool d_sticky = false;
+        // sticky = OR of all bits strictly below `round_pos`.
+        for (int p = 0; p < round_pos && !d_sticky; p++)
+            if (bit_at(p)) d_sticky = true;
+        bool d_inexact = d_round || d_sticky;
+        bool d_round_up = false;
+        if (d_inexact)
+        {
+            if (rmode == X87CW_ROUNDING_NEAREST)
+            {
+                bool d_lsb = (lsb_pos < 96) ? bit_at(lsb_pos) : false;
+                d_round_up = d_round && (d_sticky || d_lsb);
+            }
+            else if (rmode == X87CW_ROUNDING_DOWN) d_round_up = neg;
+            else if (rmode == X87CW_ROUNDING_UP)   d_round_up = !neg;
+        }
+
+        uint64_t result_mant;
+        if (combined_drop >= 64) result_mant = 0;
+        else                     result_mant = orig_mant >> combined_drop;
+        if (d_round_up)
+        {
+            result_mant += 1;
+            // Could carry into next-denormal-rank or even smallest-normal.
+            // The largest denormal mantissa is FP80_EXPLICIT_ONE - 1 (bits
+            // 0..62 set, bit 63 clear). One more makes bit 63 set — which
+            // is the smallest normal with biased_exp = 1. The fp80 wire
+            // format requires biased_exp = 1 in that case.
+            if (result_mant == FP80_EXPLICIT_ONE)
+                return fp80_t(result_mant, sign_bit | uint16_t(1));
+        }
+        if (d_inexact) out_sw |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+        if (d_round_up) out_sw |= X87SW_C1;
         return fp80_t(result_mant, sign_bit);
     }
     return fp80_t(mant, sign_bit | uint16_t(biased));
