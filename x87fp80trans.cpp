@@ -1148,16 +1148,23 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     else if (code == 3) yext = yext + npi80;
 
     dst = round_fpext96_to_fp80(yext, read_x87_cw(), flags);
-    // Always set PE and C1 for fpatan — Intel's microcode always rounds
-    // the extra-precision intermediate. UE fires when the rounded result
-    // is denormal.
-    flags |= X87SW_PRECISION_EX | X87SW_C1;
-    if (dst.isdenorm() && !dst.iszero())
+    flags |= X87SW_PRECISION_EX;
+    if (dst.iszero())
+    {
+        // Result underflowed to zero. UE fires; C1 stays 0 (rounded down).
+        // Sign follows the numerator (src2) per atan2 convention.
         flags |= X87SW_UNDERFLOW_EX;
-
-    // For sign of zero: if src2 is negative, result of zero gets a minus.
-    if (dst.iszero() && src2.sign())
-        dst = fp80_t::chs(dst);
+        dst = fp80_t(0, src2.sign() ? FP80_SIGN_MASK : 0);
+    }
+    else
+    {
+        // Non-zero result: Intel always rounds the extra-precision
+        // intermediate, so C1 is asserted. UE fires when the result is
+        // a non-zero denormal.
+        flags |= X87SW_C1;
+        if (dst.isdenorm())
+            flags |= X87SW_UNDERFLOW_EX;
+    }
 
     return flags;
 }
