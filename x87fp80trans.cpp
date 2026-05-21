@@ -525,25 +525,28 @@ uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
     if (a.isnan() || b.isnan())
     {
         bool snan = a.issnan() || b.issnan();
-        // Result NaN: prefer 'a' if NaN, else 'b'
-        if (a.isnan()) dst = a.issnan() ? fp80_t::make_qnan(a) : a;
-        else           dst = b.issnan() ? fp80_t::make_qnan(b) : b;
+        fp80_t pick;
+        if (a.isnan() && b.isnan())
+            pick = (b.mantissa() > a.mantissa()) ? b : a;
+        else
+            pick = a.isnan() ? a : b;
+        dst = pick.issnan() ? fp80_t::make_qnan(pick) : pick;
         return snan ? X87SW_INVALID_EX : 0;
     }
 
-    // Inf * anything (except 0) = signed inf of a
-    // 0 * inf-scale = 0 (no exception, scale just becomes 0 effectively)
-    if (a.iszero()) { dst = a; return 0; }
-    if (a.isinf())  { dst = a; return 0; }
+    uint16_t flags = (a.isdenorm() || b.isdenorm()) ? X87SW_DENORM_EX : 0;
+
+    if (a.iszero()) { dst = a; return flags; }
+    if (a.isinf())  { dst = a; return flags; }
 
     // b infinite: scale by 2^+inf = +inf, 2^-inf = 0
     if (b.isinf())
     {
         if (b.sign()) dst = (a.sign() ? fp80_t::const_nzero() : fp80_t::const_zero());
         else          dst = (a.sign() ? fp80_t::const_ninf()  : fp80_t::const_pinf());
-        return 0;
+        return flags;
     }
-    if (b.iszero()) { dst = a; return 0; }
+    if (b.iszero()) { dst = a; return flags; }
 
     // Truncate b to a signed integer. Saturate for huge |b|.
     int bexp = (b.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
@@ -559,16 +562,16 @@ uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
     if (new_exp >= FP80_EXPONENT_MAX_BIASED)
     {
         dst = sign ? fp80_t::const_ninf() : fp80_t::const_pinf();
-        return X87SW_OVERFLOW_EX | X87SW_PRECISION_EX;
+        return flags | X87SW_OVERFLOW_EX | X87SW_PRECISION_EX;
     }
     if (new_exp <= 0)
     {
         // For brevity treat all underflows as flushing to signed zero.
         dst = sign ? fp80_t::const_nzero() : fp80_t::const_zero();
-        return X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+        return flags | X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
     }
     dst = fp80_t(a.mantissa(), sign | uint16_t(new_exp));
-    return 0;
+    return flags;
 }
 #endif // X87_HOST_HAS_FP80
 
