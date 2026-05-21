@@ -590,12 +590,11 @@ uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
         uint64_t lost = mant & ((1ull << shift) - 1);
         uint64_t denorm_mant = mant >> shift;
         dst = fp80_t(denorm_mant, sign);
-        // UE only fires if this operation pushed the value into denormal
-        // range — i.e. src1 was a normal that scale made tiny. If src1
-        // was already denormal, no new underflow occurs.
+        // UE fires only on actual precision loss (denormal shift drops bits).
+        // A normal-input that scales cleanly into the denormal range with
+        // zero lost mantissa bits is exact — no UE.
         uint16_t under_flags = 0;
-        if (!a.isdenorm()) under_flags |= X87SW_UNDERFLOW_EX;
-        if (lost != 0) under_flags |= X87SW_PRECISION_EX | X87SW_UNDERFLOW_EX;
+        if (lost != 0) under_flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
         return flags | under_flags;
     }
     dst = fp80_t(mant, sign | uint16_t(new_exp));
