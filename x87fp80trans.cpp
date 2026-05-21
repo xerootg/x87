@@ -1277,16 +1277,28 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     fpext_t s2 = s * s;
 
     // log(m) = 2*s * (1 + s^2/3 + s^4/5 + s^6/7 + ...)
-    // Polynomial in s2 of the series.
-    static fpext_t const c1_3(0xaaaaaaaaaaaaaaaaull, 0xaaaaaaab, -2, 0);  // 1/3
-    static fpext_t const c1_5(0xccccccccccccccccull, 0xcccccccd, -3, 0);  // 1/5
-    static fpext_t const c1_7(0x9249249249249249ull, 0x24924925, -3, 0);  // 1/7
-    static fpext_t const c1_9(0xe38e38e38e38e38eull, 0x38e38e39, -4, 0);  // 1/9
-    static fpext_t const c1_11(0xba2e8ba2e8ba2e8bull, 0xa2e8ba2f, -4, 0); // 1/11
-    static fpext_t const c1_13(0x9d89d89d89d89d89ull, 0xd89d89d9, -4, 0); // 1/13
+    // Extended Horner — at worst |s| ≈ 1/3 (when m approaches 2), so each
+    // higher term reduces the truncation error by a factor of 9. Going out
+    // to 1/23 gives ~37-bit truncation, well below the 32-bit fpext96
+    // extension boundary.
+    static fpext_t const c1_3 (0xaaaaaaaaaaaaaaaaull, 0xaaaaaaab, -2, 0);
+    static fpext_t const c1_5 (0xccccccccccccccccull, 0xcccccccd, -3, 0);
+    static fpext_t const c1_7 (0x9249249249249249ull, 0x24924925, -3, 0);
+    static fpext_t const c1_9 (0xe38e38e38e38e38eull, 0x38e38e39, -4, 0);
+    static fpext_t const c1_11(0xba2e8ba2e8ba2e8bull, 0xa2e8ba2f, -4, 0);
+    static fpext_t const c1_13(0x9d89d89d89d89d89ull, 0xd89d89d9, -4, 0);
+    static fpext_t const c1_15(0x8888888888888888ull, 0x88888889, -4, 0);
+    static fpext_t const c1_17(0xf0f0f0f0f0f0f0f0ull, 0xf0f0f0f1, -5, 0);
+    static fpext_t const c1_19(0xd79435e50d79435eull, 0x50d79435, -5, 0);
+    static fpext_t const c1_21(0xc30c30c30c30c30cull, 0x30c30c30, -5, 0);
+    static fpext_t const c1_23(0xb21642c8590b2164ull, 0x2c8590b2, -5, 0);
 
-    // Horner: ((((c1_13 * s2 + c1_11) * s2 + c1_9) * s2 + c1_7) * s2 + c1_5) * s2 + c1_3) * s2 + 1
-    fpext_t poly = c1_13 * s2 + c1_11;
+    fpext_t poly = c1_23 * s2 + c1_21;
+    poly = poly * s2 + c1_19;
+    poly = poly * s2 + c1_17;
+    poly = poly * s2 + c1_15;
+    poly = poly * s2 + c1_13;
+    poly = poly * s2 + c1_11;
     poly = poly * s2 + c1_9;
     poly = poly * s2 + c1_7;
     poly = poly * s2 + c1_5;
