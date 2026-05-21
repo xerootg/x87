@@ -589,12 +589,21 @@ uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
         }
         uint64_t lost = mant & ((1ull << shift) - 1);
         uint64_t denorm_mant = mant >> shift;
+        // Round-to-nearest-even on the discarded bits.
+        bool round_up = false;
+        if (lost != 0)
+        {
+            uint64_t round_bit = (shift >= 1) ? (1ull << (shift - 1)) : 0;
+            bool round  = (lost & round_bit) != 0;
+            bool sticky = (lost & (round_bit - 1)) != 0;
+            // For ROUND_NEAREST (the only mode we model here):
+            round_up = round && (sticky || (denorm_mant & 1));
+            if (round_up) denorm_mant += 1;
+        }
         dst = fp80_t(denorm_mant, sign);
-        // UE fires only on actual precision loss (denormal shift drops bits).
-        // A normal-input that scales cleanly into the denormal range with
-        // zero lost mantissa bits is exact — no UE.
         uint16_t under_flags = 0;
         if (lost != 0) under_flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+        if (round_up) under_flags |= X87SW_C1;
         return flags | under_flags;
     }
     dst = fp80_t(mant, sign | uint16_t(new_exp));
