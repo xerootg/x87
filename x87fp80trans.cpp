@@ -548,12 +548,20 @@ uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
     }
     if (b.iszero()) { dst = a; return flags; }
 
-    // Truncate b to a signed integer. Saturate for huge |b|.
+    // Truncate b to a signed integer. Saturate for huge |b| at a magnitude
+    // that comfortably covers the fp80 exponent range without overflowing
+    // int64 when added to the biased exponent.
     int bexp = (b.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
     int64_t scale;
+    constexpr int64_t SCALE_SAT = 0x40000;   // far exceeds fp80 exponent range
     if (bexp < 0)        scale = 0;
-    else if (bexp >= 63) scale = b.sign() ? INT64_MIN : INT64_MAX;
-    else                 scale = int64_t(b.mantissa() >> (63 - bexp)) * (b.sign() ? -1 : 1);
+    else if (bexp >= 63) scale = b.sign() ? -SCALE_SAT : SCALE_SAT;
+    else
+    {
+        int64_t v = int64_t(b.mantissa() >> (63 - bexp));
+        if (v > SCALE_SAT) v = SCALE_SAT;
+        scale = b.sign() ? -v : v;
+    }
 
     // No scale change: return src1 verbatim (only DE if denormal).
     if (scale == 0) { dst = a; return flags; }
@@ -579,11 +587,23 @@ uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
     }
     if (new_exp <= 0)
     {
-        // Re-denormalize: shift mantissa right by (1 - new_exp). If the
-        // shift goes past 64 bits the value flushes to zero.
+        // Re-denormalize: shift mantissa right by (1 - new_exp).
         int64_t shift = 1 - new_exp;
         if (shift >= 64)
         {
+            // The value is smaller than the smallest denormal. With round-
+            // to-nearest, round to mantissa 1 when value > 0.5 × smallest.
+            // shift == 64 with normalized mantissa: value = mant × 2^(emin-127).
+            // 0.5 × smallest = 2^(emin-64). So value > 0.5*smallest iff
+            // mant > 2^63 OR mant == 2^63 and any lower bits.
+            bool round_up = (shift == 64) &&
+                            (mant > FP80_EXPLICIT_ONE);
+            // (Ties at exactly 0.5×smallest → round to even = 0.)
+            if (round_up)
+            {
+                dst = fp80_t(1, sign);
+                return flags | X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX | X87SW_C1;
+            }
             dst = sign ? fp80_t::const_nzero() : fp80_t::const_zero();
             return flags | X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
         }
