@@ -555,6 +555,9 @@ uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
     else if (bexp >= 63) scale = b.sign() ? INT64_MIN : INT64_MAX;
     else                 scale = int64_t(b.mantissa() >> (63 - bexp)) * (b.sign() ? -1 : 1);
 
+    // No scale change: return src1 verbatim (only DE if denormal).
+    if (scale == 0) { dst = a; return flags; }
+
     // Apply scale to a's exponent.
     int64_t new_exp = int64_t(a.sign_exp() & FP80_EXPONENT_MASK) + scale;
     uint16_t sign = a.sign_exp() & FP80_SIGN_MASK;
