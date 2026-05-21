@@ -671,8 +671,12 @@ static uint16_t fprem_core_fp80(fp80_t const &src1, fp80_t const &src2, fp80_t &
     if (src1.isnan() || src2.isnan())
     {
         bool snan = src1.issnan() || src2.issnan();
-        if (src1.isnan()) dst = src1.issnan() ? fp80_t::make_qnan(src1) : src1;
-        else              dst = src2.issnan() ? fp80_t::make_qnan(src2) : src2;
+        fp80_t pick;
+        if (src1.isnan() && src2.isnan())
+            pick = (src2.mantissa() > src1.mantissa()) ? src2 : src1;
+        else
+            pick = src1.isnan() ? src1 : src2;
+        dst = pick.issnan() ? fp80_t::make_qnan(pick) : pick;
         return snan ? X87SW_INVALID_EX : 0;
     }
     // Special inputs
@@ -903,8 +907,12 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     if (src1.isnan() || src2.isnan())
     {
         bool snan = src1.issnan() || src2.issnan();
-        if (src1.isnan()) dst = src1.issnan() ? fp80_t::make_qnan(src1) : src1;
-        else              dst = src2.issnan() ? fp80_t::make_qnan(src2) : src2;
+        fp80_t pick;
+        if (src1.isnan() && src2.isnan())
+            pick = (src2.mantissa() > src1.mantissa()) ? src2 : src1;
+        else
+            pick = src1.isnan() ? src1 : src2;
+        dst = pick.issnan() ? fp80_t::make_qnan(pick) : pick;
         return snan ? X87SW_INVALID_EX : 0;
     }
     // Returning a π-based constant: x87 stores 66-bit internal π and rounds
@@ -1134,8 +1142,12 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     if (src1.isnan() || src2.isnan())
     {
         bool snan = src1.issnan() || src2.issnan();
-        if (src1.isnan()) dst = src1.issnan() ? fp80_t::make_qnan(src1) : src1;
-        else              dst = src2.issnan() ? fp80_t::make_qnan(src2) : src2;
+        fp80_t pick;
+        if (src1.isnan() && src2.isnan())
+            pick = (src2.mantissa() > src1.mantissa()) ? src2 : src1;
+        else
+            pick = src1.isnan() ? src1 : src2;
+        dst = pick.issnan() ? fp80_t::make_qnan(pick) : pick;
         return snan ? X87SW_INVALID_EX : 0;
     }
     if (src1.sign())
@@ -1299,8 +1311,12 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
     if (src1.isnan() || src2.isnan())
     {
         bool snan = src1.issnan() || src2.issnan();
-        if (src1.isnan()) dst = src1.issnan() ? fp80_t::make_qnan(src1) : src1;
-        else              dst = src2.issnan() ? fp80_t::make_qnan(src2) : src2;
+        fp80_t pick;
+        if (src1.isnan() && src2.isnan())
+            pick = (src2.mantissa() > src1.mantissa()) ? src2 : src1;
+        else
+            pick = src1.isnan() ? src1 : src2;
+        dst = pick.issnan() ? fp80_t::make_qnan(pick) : pick;
         return snan ? X87SW_INVALID_EX : 0;
     }
     // src2 = 0 (multiplier zero): x87 returns signed 0 without checking
