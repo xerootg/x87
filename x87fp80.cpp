@@ -981,8 +981,19 @@ static uint16_t do_add(fp80_t a, fp80_t b, fp80_t &dst, bool subtract)
     if (a.isnan() || b.isnan())
     {
         bool snan = a.issnan() || b.issnan();
-        if (a.isnan()) dst = a.issnan() ? fp80_t::make_qnan(a) : a;
-        else           dst = b.issnan() ? fp80_t::make_qnan(b) : b;
+        fp80_t pick;
+        if (a.isnan() && b.isnan())
+        {
+            // x87 picks the NaN with the larger significand (Intel SDM,
+            // §8.2.2 NaN propagation: "the NaN with the largest mantissa
+            // is returned" for binary ops).
+            pick = (b.mantissa() > a.mantissa()) ? b : a;
+        }
+        else
+        {
+            pick = a.isnan() ? a : b;
+        }
+        dst = pick.issnan() ? fp80_t::make_qnan(pick) : pick;
         return snan ? X87SW_INVALID_EX : 0;
     }
     if (subtract) b = fp80_t::chs(b);
