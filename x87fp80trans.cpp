@@ -558,22 +558,47 @@ uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
     // No scale change: return src1 verbatim (only DE if denormal).
     if (scale == 0) { dst = a; return flags; }
 
-    // Apply scale to a's exponent.
-    int64_t new_exp = int64_t(a.sign_exp() & FP80_EXPONENT_MASK) + scale;
+    // Normalize denormal src1: shift mantissa MSB to bit 63, track the
+    // implicit exponent shift. We then work with a "virtual biased exp"
+    // that can be negative for very small inputs.
+    uint64_t mant = a.mantissa();
+    int64_t  biased = int64_t(a.sign_exp() & FP80_EXPONENT_MASK);
+    if (biased == 0 && mant != 0)
+    {
+        int s = count_leading_zeros64(mant);
+        mant <<= s;
+        biased = 1 - s;   // virtual biased exp (negative for deep denormals)
+    }
+    int64_t new_exp = biased + scale;
     uint16_t sign = a.sign_exp() & FP80_SIGN_MASK;
 
     if (new_exp >= FP80_EXPONENT_MAX_BIASED)
     {
         dst = sign ? fp80_t::const_ninf() : fp80_t::const_pinf();
-        return flags | X87SW_OVERFLOW_EX | X87SW_PRECISION_EX;
+        return flags | X87SW_OVERFLOW_EX | X87SW_PRECISION_EX | X87SW_C1;
     }
     if (new_exp <= 0)
     {
-        // For brevity treat all underflows as flushing to signed zero.
-        dst = sign ? fp80_t::const_nzero() : fp80_t::const_zero();
-        return flags | X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+        // Re-denormalize: shift mantissa right by (1 - new_exp). If the
+        // shift goes past 64 bits the value flushes to zero.
+        int64_t shift = 1 - new_exp;
+        if (shift >= 64)
+        {
+            dst = sign ? fp80_t::const_nzero() : fp80_t::const_zero();
+            return flags | X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+        }
+        uint64_t lost = mant & ((1ull << shift) - 1);
+        uint64_t denorm_mant = mant >> shift;
+        dst = fp80_t(denorm_mant, sign);
+        // UE only fires if this operation pushed the value into denormal
+        // range — i.e. src1 was a normal that scale made tiny. If src1
+        // was already denormal, no new underflow occurs.
+        uint16_t under_flags = 0;
+        if (!a.isdenorm()) under_flags |= X87SW_UNDERFLOW_EX;
+        if (lost != 0) under_flags |= X87SW_PRECISION_EX | X87SW_UNDERFLOW_EX;
+        return flags | under_flags;
     }
-    dst = fp80_t(a.mantissa(), sign | uint16_t(new_exp));
+    dst = fp80_t(mant, sign | uint16_t(new_exp));
     return flags;
 }
 #endif // X87_HOST_HAS_FP80
