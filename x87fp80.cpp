@@ -701,17 +701,28 @@ fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &out_sw)
         out_sw &= ~(X87SW_C1 | X87SW_PRECISION_EX | X87SW_UNDERFLOW_EX);
         if (shift >= 64)
         {
-            // Result rounds to a denormal whose magnitude is below 2^(emin-63).
-            // For round-to-nearest-zero / truncation modes the result is 0.
-            // For directed rounding "away from zero", the result is the
-            // smallest denormal.
+            // Result is below the smallest denormal magnitude. For round-
+            // to-nearest with magnitude > 0.5 × smallest_denormal, still
+            // round up to mantissa 1. The boundary is at shift == 64 with
+            // mantissa.MSB exactly set; below-or-tied → 0, above → 1.
             bool any_bits = (orig_mant != 0) || (orig_ext != 0);
             if (any_bits)
                 out_sw |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
-            bool away =
+            bool away_directed =
                 (rmode == X87CW_ROUNDING_UP && !neg) ||
                 (rmode == X87CW_ROUNDING_DOWN && neg);
-            if (away && any_bits)
+            bool round_to_smallest = false;
+            if (rmode == X87CW_ROUNDING_NEAREST && shift == 64)
+            {
+                // Value vs 0.5 × smallest_denormal:
+                //   > 0.5 × smallest  ⇔  orig_mant > FP80_EXPLICIT_ONE OR
+                //                        (orig_mant == FP80_EXPLICIT_ONE && ext != 0)
+                // ties (orig_mant == FP80_EXPLICIT_ONE && ext == 0) → 0 (round to even)
+                if (orig_mant > FP80_EXPLICIT_ONE ||
+                    (orig_mant == FP80_EXPLICIT_ONE && orig_ext != 0))
+                    round_to_smallest = true;
+            }
+            if ((away_directed || round_to_smallest) && any_bits)
             {
                 out_sw |= X87SW_C1;
                 return fp80_t(1, sign_bit);
