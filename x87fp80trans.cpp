@@ -1442,8 +1442,6 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
         fp80_t one_plus_x;
         fp80_t::x87_fadd(src1, fp80_t::const_one(), one_plus_x);
         uint16_t sub_flags = x87_fyl2x(one_plus_x, src2, dst);
-        // Intel asserts UE+PE on fyl2xp1 when the result is denormal,
-        // regardless of whether the multiplication was exact internally.
         if (dst.isdenorm() && !dst.iszero())
             sub_flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
         return sub_flags | (flags & X87SW_DENORM_EX);
@@ -1493,6 +1491,10 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
     dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
     flags |= X87SW_PRECISION_EX;
     if (dst.isdenorm() && !dst.iszero())
+        flags |= X87SW_UNDERFLOW_EX;
+    // If the result rounded to zero from non-zero inputs, that is also
+    // underflow.
+    if (dst.iszero() && !src1.iszero() && !src2.iszero())
         flags |= X87SW_UNDERFLOW_EX;
     return flags;
 }
