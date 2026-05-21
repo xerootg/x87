@@ -1263,8 +1263,10 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
         if (src1.sign_exp() > 0xBFFF ||
             (src1.sign_exp() == 0xBFFF && src1.mantissa() > FP80_EXPLICIT_ONE))
         {
-            dst = fp80_t::const_indef();
-            return X87SW_INVALID_EX;
+            // |src1| > 1, src1 negative: outside fyl2xp1's domain. Intel
+            // returns src1 unchanged with PE + DE rather than INDEF.
+            dst = src1;
+            return flags | X87SW_PRECISION_EX | X87SW_DENORM_EX;
         }
         // src1 == -1 → log(0) = -inf (handled below as DZ)
         if (src1.sign_exp() == 0xBFFF && src1.mantissa() == FP80_EXPLICIT_ONE)
@@ -1322,6 +1324,13 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
     // fyl2x(1 + src1, src2) which uses the well-conditioned (m-1)/(m+1)
     // path on the renormalized mantissa.
     int src1_exp = (src1.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
+    // For negative src1 with |src1| >= 1, 1+src1 <= 0 and fyl2x is undefined.
+    // Intel passes src1 through and signals PE + DE.
+    if (src1.sign() && src1_exp >= 0)
+    {
+        dst = src1;
+        return flags | X87SW_PRECISION_EX | X87SW_DENORM_EX;
+    }
     if (src1_exp > -2)   // |src1| > ~0.25
     {
         fp80_t one_plus_x;
