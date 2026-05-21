@@ -704,7 +704,36 @@ static uint16_t fprem_core_fp80(fp80_t const &src1, fp80_t const &src2, fp80_t &
     int dexp = ea - eb;
     if (dexp < 0)
     {
-        // |src1| < |src2|: result is src1 unchanged, quotient = 0.
+        // |src1| < |src2|. For fprem the quotient is 0 and result = src1.
+        // For fprem1 round-to-nearest-even, the quotient may be ±1 when
+        // 2*|src1| > |src2| or (2*|src1| == |src2| and quotient is odd).
+        if (Rem1 && dexp == -1)
+        {
+            // |src1|/|src2| = (ma/mb)/2 (since dexp = -1). The half-point
+            // for round-to-nearest is ma == mb. For ma > mb the ratio
+            // exceeds 0.5 and the quotient rounds away from zero.
+            // (Tie: ma == mb → quotient = 1 only if that makes it even —
+            // but the quotient candidates are 0 (even) and 1 (odd), so
+            // ties go to 0.)
+            bool round_away = ma > mb;
+            if (round_away)
+            {
+                // result = src1 - sign(src1/src2) * src2 = src1 + (sign_b==sign_a ? -src2 : +src2)
+                fp80_t neg_src2 = fp80_t::chs(src2);
+                // src1 / src2 sign == sign_a XOR sign_b. If non-negative we sub src2.
+                fp80_t addend = (src1.sign() == src2.sign()) ? neg_src2 : src2;
+                fp80_t result;
+                fp80_t::x87_fadd(src1, addend, result);
+                dst = result;
+                // Q bit C1 should reflect rounding direction: we rounded
+                // away from zero in the quotient, so result magnitude is
+                // smaller than src1's. C1 reflects whether the residue had
+                // its mantissa rounded up by the subtraction — leave to
+                // round behavior of fadd; just set C1 to indicate quotient
+                // = 1 (per Intel Q-bit encoding: C1=Q_LSB).
+                return flags | X87SW_C1;
+            }
+        }
         dst = src1;
         return flags;
     }
