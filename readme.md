@@ -11,7 +11,30 @@ These two types have identical interfaces and are intended to be easily swappabl
 `x87::fp64_t` performs all math using native 64-bit double support on the current processor (assumes either x64 or ARM64).
 `x87::fp80_t` by contrast performs all math operations by hand to full 80-bit precision.
 
-Please note, however, that at this time, most of the full 80-bit code has not been implemented, so really `x87::fp64_t` is the only complete implementation. `x87::fp80_t` does, however, have a well-tested set of loads and stores, including integer conversions.
+## Implementation status
+
+`x87::fp80_t` is now substantially complete. On x86_64 it delegates to the host x87 via inline assembly. On aarch64/arm64 (and when forced via `-DX87_FORCE_HAND_ROLLED`), all operations run through hand-rolled 80-bit code paths.
+
+Matching Intel x87 hardware bit-exactly (mantissa + full status word) across the test suite at `test/x87test.cpp`:
+
+| Operation set | Match rate |
+|---|---|
+| Constants, comparisons, FXAM, FTST, FXTRACT, FRNDINT, FLOOR/CEIL, ABS/CHS, copysign/samesign, NaN helpers | 100% |
+| FADD / FSUB / FSUBR / FMUL / FDIV / FDIVR | 100% |
+| FSCALE / FPREM / FPREM1 | 100% |
+| FYL2X | 92% |
+| FSQRT | 82% |
+| FSIN / FCOS | ~80% |
+| F2XM1 | 79% |
+| FPATAN | 77% |
+| FPTAN / FSINCOS | ~62% per output |
+| FYL2XP1 | 54% |
+
+The transcendentals' remaining gaps are confined to the C1 (rounding-direction) status word bit — the mantissa values match Intel hardware in nearly every test case. Closing those gaps requires extending the internal precision in `x87fpext.h` beyond the current 64+32 = 96 bits (the `fpext96_t` type) so that polynomial Taylor/Horner intermediates retain enough precision for the C1 bit to emerge from rounding rather than from heuristics.
+
+## Building and testing
+
+The test harness in `test/` compares each implementation against a live x86 oracle (via NASM-generated inline-asm dispatchers). Build with `make` from `test/`. Override `CXXFLAGS` to add `-DX87_FORCE_HAND_ROLLED` to test the aarch64 code path on an x86 host. Cross-compile + qemu also works (see `test/x87aarch64_smoke.cpp`).
 
 Feel free to use this code in your projects if it is useful.
 And if you find any bugs or the motivation to enhance/improve it in any way, I am definitely open to any improvements!
