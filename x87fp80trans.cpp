@@ -681,11 +681,10 @@ static uint16_t fprem_core_fp80(fp80_t const &src1, fp80_t const &src2, fp80_t &
         }
     }
 
-    // For fprem1 (IEEE), round quotient toward even. This means if the
-    // remainder is more than half |src2|, subtract one more mb (going
-    // negative) so the absolute remainder is minimized.
+    // For fprem1 (IEEE), round quotient toward even — only on the FINAL
+    // reduction step (factor == 0). Partial reductions return like fprem.
     bool rem_negative = false;
-    if (Rem1)
+    if (Rem1 && factor == 0)
     {
         // Compare 2*rem to mb. If 2*rem > mb, or 2*rem == mb and quotient is odd,
         // subtract one more.
