@@ -655,32 +655,21 @@ static uint16_t fprem_core_fp80(fp80_t const &src1, fp80_t const &src2, fp80_t &
         dexp -= factor;
     }
 
-    // Reduce mantissa: rem = ma, repeatedly subtract aligned mb.
-    // ma, mb each have MSB at bit 63. We shift ma left up to dexp so that
-    // remainder can be computed cleanly.
+    // Standard binary long division: compute floor((ma << dexp) / mb).
+    // Iterate (dexp + 1) times — equivalent to standard "process every bit
+    // of N from MSB to LSB" but starting at R=ma since the first 63 trivial
+    // doublings can't trigger a subtraction (ma < 2^64 ≤ 2 * mb).
     //
-    // Standard partial remainder: for k from dexp down to 0,
-    //   tentative = ma_shifted_left_k - mb. If tentative >= 0, ma_shifted_left_k = tentative.
-    // The accumulated quotient bits track which subtractions succeeded.
-    //
-    // Simpler implementation using __uint128_t:
+    // Result quotient: up to (dexp + 1) bits.
     __uint128_t rem = (__uint128_t)ma;
     uint64_t quotient = 0;
-    for (int k = dexp; k >= 0; k--)
+    // For ma >= mb, the first iteration already has rem >= mb (no shift
+    // needed) — handle that case specially with one initial subtraction.
+    if (rem >= (__uint128_t)mb)
     {
-        __uint128_t shifted_mb = ((__uint128_t)mb) << (k - dexp + 0);
-        // shifted_mb at bit-position-aligned with rem at position k.
-        // Actually easier: keep rem in scale where rem's MSB is at bit
-        // (63 + dexp), and mb is at bit 63. Each iteration k handles
-        // bit position k of the quotient.
-        (void)shifted_mb;
+        rem -= mb;
+        quotient = 1;
     }
-    // The above loop is a placeholder — rewrite as a cleaner algorithm:
-    // Track rem as a value with magnitude < 2 × |src2 mantissa|.
-    // For dexp = ea - eb iterations, double rem (left-shift 1) and subtract
-    // mb if rem >= mb.
-    quotient = 0;
-    rem = (__uint128_t)ma;
     for (int k = 0; k < dexp; k++)
     {
         rem <<= 1;
@@ -690,13 +679,6 @@ static uint16_t fprem_core_fp80(fp80_t const &src1, fp80_t const &src2, fp80_t &
             rem -= mb;
             quotient |= 1;
         }
-    }
-    // Final step: try one more subtract to handle the "ones place".
-    quotient <<= 1;
-    if (rem >= (__uint128_t)mb)
-    {
-        rem -= mb;
-        quotient |= 1;
     }
 
     // For fprem1 (IEEE), round quotient toward even. This means if the
@@ -729,19 +711,25 @@ static uint16_t fprem_core_fp80(fp80_t const &src1, fp80_t const &src2, fp80_t &
     if (rem == 0)
     {
         dst = fp80_t(0, result_sign);
+        if (factor != 0)
+            return flags | X87SW_C2;
         return flags | ((quotient & 1) << X87SW_C1_BIT)
                      | ((quotient & 2) << (X87SW_C3_BIT - 1))
                      | ((quotient & 4) << (X87SW_C0_BIT - 2));
     }
-    // Find leading zero count in 128-bit rem.
+    // rem is the integer remainder N - Q*D where N = ma << dexp, D = mb.
+    // It represents a fp value of rem × 2^(eb - 63). Find rem's MSB to
+    // build the fpext96_t (mantissa-MSB at bit 63).
     uint64_t hi = uint64_t(rem >> 64);
     uint64_t lo = uint64_t(rem);
-    int lz = (hi != 0) ? count_leading_zeros64(hi) : (64 + count_leading_zeros64(lo));
-    int total_bits_used = 128 - lz;
-    rem <<= lz;
-    // After shift, rem's MSB at bit 127. The 64-bit mantissa is the top 64.
-    uint64_t result_mant = uint64_t(rem >> 64);
-    int result_exp = eb - dexp + (total_bits_used - 1);
+    int msb_pos = (hi != 0) ? (127 - count_leading_zeros64(hi))
+                            : (63 - count_leading_zeros64(lo));
+    uint64_t result_mant;
+    if (msb_pos >= 63)
+        result_mant = uint64_t(rem >> (msb_pos - 63));
+    else
+        result_mant = lo << (63 - msb_pos);
+    int result_exp = eb + factor + (msb_pos - 63);
 
     int biased_exp = result_exp + FP80_EXPONENT_BIAS;
     if (biased_exp >= FP80_EXPONENT_MAX_BIASED)
@@ -755,21 +743,21 @@ static uint16_t fprem_core_fp80(fp80_t const &src1, fp80_t const &src2, fp80_t &
         int shift = 1 - biased_exp;
         if (shift >= 64) dst = fp80_t(0, result_sign);
         else             dst = fp80_t(result_mant >> shift, result_sign);
-        flags |= X87SW_UNDERFLOW_EX;
+        // fprem residue is exact (integer subtraction) — no UE.
     }
     else
     {
         dst = fp80_t(result_mant, result_sign | uint16_t(biased_exp));
     }
 
+    if (factor != 0)
+    {
+        // Partial reduction — only C2 is meaningful; Q bits are undefined.
+        return flags | X87SW_C2;
+    }
     uint16_t qbits = ((quotient & 1) << X87SW_C1_BIT)
                    | ((quotient & 2) << (X87SW_C3_BIT - 1))
                    | ((quotient & 4) << (X87SW_C0_BIT - 2));
-    if (factor != 0)
-    {
-        // Partial reduction not complete — set C2.
-        flags |= X87SW_C2;
-    }
     return flags | qbits;
 }
 
