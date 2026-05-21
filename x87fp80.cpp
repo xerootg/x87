@@ -706,6 +706,11 @@ fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &out_sw)
         // If already inexact from primary rounding, UE fires too.
         if (out_sw & X87SW_PRECISION_EX)
             out_sw |= X87SW_UNDERFLOW_EX;
+        // If primary rounding rounded up at a bit below the denorm-shift cut,
+        // the bump fell off — the final mantissa equals the truncated value,
+        // so C1 should not flag a round-up.
+        if (round_up && drop_in_mant < shift)
+            out_sw &= ~X87SW_C1;
         return fp80_t(result_mant, sign_bit);
     }
     return fp80_t(mant, sign_bit | uint16_t(biased));
