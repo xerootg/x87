@@ -1492,10 +1492,10 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
 
     dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
     flags |= X87SW_PRECISION_EX;
-    if (dst.isdenorm() && !dst.iszero())
+    if (dst.isdenorm() || dst.iszero())
     {
-        // Intel asserts UE + C1 alongside PE on fyl2xp1 denormal results.
-        flags |= X87SW_UNDERFLOW_EX | X87SW_C1;
+        flags |= X87SW_UNDERFLOW_EX;
+        flags &= ~X87SW_C1;  // not asserted on underflow per observed behavior
     }
     return flags;
 }
