@@ -1312,6 +1312,10 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     static fpext_t const c1_29(0x8d3dcb08d3dcb08dull, 0x3dcb08d4, -5, 0);
     static fpext_t const c1_31(0x8421084210842108ull, 0x42108421, -5, 0);
 
+    // Split form: log((1+s)/(1-s)) = 2s + 2s · (s² · Q(s²))
+    // where Q(z) = 1/3 + z/5 + z²/7 + … (no constant-1 term).
+    // Same insight as fsin/fpatan — keep the dominant linear term out of
+    // the polynomial summation for better small-argument behavior.
     fpext_t poly = c1_31 * s2 + c1_29;
     poly = poly * s2 + c1_27;
     poly = poly * s2 + c1_25;
@@ -1326,10 +1330,14 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     poly = poly * s2 + c1_7;
     poly = poly * s2 + c1_5;
     poly = poly * s2 + c1_3;
-    poly = poly * s2 + one;
+    // poly now = 1/3 + s²/5 + … (no constant-1)
 
     fpext_t two(0x8000000000000000ull, 0x00000000, 1, 0);
-    fpext_t logm = two * s * poly;     // log(m) (natural log)
+    fpext_t two_s = two * s;             // 2s
+    fpext_t s2_poly = s2 * poly;         // s² · Q(s²)
+    fpext_t correction = two_s * s2_poly;
+    fpext_t logm;
+    logm.add(two_s, correction);          // 2s + 2s · (s² · Q(s²))
 
     // log2(m) = log(m) * (1/ln(2))
     static fpext_t const invln2(0xb8aa3b295c17f0bbull, 0xbe87fed0, 0, 0);
@@ -1515,6 +1523,7 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
     static fpext_t const c1_29(0x8d3dcb08d3dcb08dull, 0x3dcb08d4, -5, 0);
     static fpext_t const c1_31(0x8421084210842108ull, 0x42108421, -5, 0);
 
+    // Split form (same as fyl2x): log((1+s)/(1-s)) = 2s + 2s·(s²·Q(s²)).
     fpext_t poly = c1_31 * s2 + c1_29;
     poly = poly * s2 + c1_27;
     poly = poly * s2 + c1_25;
@@ -1529,9 +1538,13 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
     poly = poly * s2 + c1_7;
     poly = poly * s2 + c1_5;
     poly = poly * s2 + c1_3;
-    poly = poly * s2 + one;
+    // poly = 1/3 + s²/5 + … (no constant-1)
 
-    fpext_t logm = two * s * poly;
+    fpext_t two_s = two * s;
+    fpext_t s2_poly = s2 * poly;
+    fpext_t correction = two_s * s2_poly;
+    fpext_t logm;
+    logm.add(two_s, correction);
 
     // Multiply by 1/ln(2) instead of dividing by ln(2) — avoids div64's
     // fp64-precision bottleneck (which can overflow for huge values).
