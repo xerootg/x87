@@ -1345,6 +1345,15 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
         return flags;
     }
 
+    // src1 == 1.0 exactly: log2(1) = +0, result = src2 * (+0) = signed zero
+    // with src2's sign. Special-case before the polynomial path so the
+    // chain's residual rounding-error doesn't spuriously trigger PE.
+    if (src1.sign_exp() == 0x3FFF && src1.mantissa() == FP80_EXPLICIT_ONE)
+    {
+        dst = src2.sign() ? fp80_t::const_nzero() : fp80_t::const_zero();
+        return flags;
+    }
+
     // Main path: src1 ∈ (0, ∞), src1 != 1, src2 finite non-zero.
     // log2(src1) = exponent_of(src1) + log2(mantissa_of(src1)) where mantissa ∈ [1, 2).
     //
