@@ -1889,11 +1889,15 @@ uint16_t fp80_t::x87_fsincos(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
         case 2: sin_r = s_ext; sin_r.chs(); cos_r = c_ext; cos_r.chs(); break;
         case 3: sin_r = c_ext; sin_r.chs(); cos_r = s_ext;            break;
     }
-    // Both rounds share the input flags so C1/PE from either rounding
-    // reaches the returned status word (Intel exposes the final-result
-    // C1; merging the two is the cheapest match).
+    // Intel's fsincos pushes sin then cos onto the stack, so cos is the
+    // last value rounded — and fstsw after fsincos reflects only cos's
+    // rounding direction (probed: fsincos SW = fcos SW, NOT the OR of
+    // fsin and fcos). Round sin into a discardable flag word that only
+    // contributes PE / UE, and let cos's rounding drive C1 directly.
+    uint16_t sin_flags = 0;
+    dst2 = round_fpext96_to_fp80(sin_r, read_x87_cw(), sin_flags);
+    flags |= sin_flags & ~X87SW_C1;
     dst1 = round_fpext96_to_fp80(cos_r, read_x87_cw(), flags);
-    dst2 = round_fpext96_to_fp80(sin_r, read_x87_cw(), flags);
     flags |= X87SW_PRECISION_EX;
     if (dst1.isdenorm() || dst1.iszero() || dst2.isdenorm() || dst2.iszero())
         flags |= X87SW_UNDERFLOW_EX;
