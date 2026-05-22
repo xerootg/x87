@@ -22,19 +22,21 @@ Matching Intel x87 hardware bit-exactly (mantissa + full status word) across the
 | Constants, comparisons, FXAM, FTST, FXTRACT, FRNDINT, FLOOR/CEIL, ABS/CHS, copysign/samesign, NaN helpers | 100% |
 | FADD / FSUB / FSUBR / FMUL / FDIV / FDIVR | 100% |
 | FSCALE / FPREM / FPREM1 | 100% |
+| FSQRT | 99.9% |
 | FYL2X | 95% |
 | F2XM1 | 90% |
-| FSQRT | 82% |
 | FSIN / FCOS | ~80% |
 | FPATAN | 80% |
+| FPTAN | ~72% per output |
 | FYL2XP1 | 66% |
-| FPTAN / FSINCOS | ~62% per output |
+| FSINCOS | ~66% per output |
 
 The transcendentals' remaining gaps are almost entirely in the C1 (rounding-direction) status word bit — the mantissa values match Intel hardware in nearly every test case. Two empirical findings shape the implementation:
 
 - Higher internal precision (the `fpext128_t` template, with 64+64 = 128 mantissa+ext bits) does *not* automatically improve C1 match, because Intel's microcode uses a specific polynomial chain that we approximate but cannot reproduce byte-exactly. Where it does help — driving down mantissa errors — is in the division and multiplication primitives, not in extending polynomial widths.
 - The split-form polynomial sin(y) = y + y·(z·P(z)) used in `taylor_sin/taylor_cos` was derived empirically by probing Intel x87 — it matches native fp80 hardware 96% bit-exact, though our hand-rolled fp80 multiply chain diverges in the LSBs. The same insight drives the fyl2x / fyl2xp1 / fpatan polynomial forms.
 - A Newton-Raphson `fpextxx_t::div` (exponent-rescaled fp64 seed, two iterations) replaces the previous fp64-precision `div64` in the log substitution chain `s = (m-1)/(m+1)` and atan's `src2/src1`. Capping divisor precision at 53 bits silently caps the whole polynomial output at 53 bits; the fix lifted fyl2xp1 by ~11 points, fyl2x by ~2, fpatan by ~0.4. (fp64 div64 is fine for the host-x86 reference path, but for the hand-rolled fpext96 polynomial it was the bottleneck.)
+- The fsqrt shift-and-subtract has an even-exponent path that right-shifts mant by 1 to keep `(exp - 63)` even. The lost LSB sat as a sticky-lifeline bit, but the shifted-input sqrt's mantissa lands half an fp80 ULP below the true-input sqrt — so the post-round C1 reflects the shifted rounding direction, not the actual one. Adding 0.5 fp80 ULPs to the 96-bit result before the final round (and dropping the now-redundant lifeline-sticky) moved fsqrt from 82% to 99.9%.
 
 ## Building and testing
 
