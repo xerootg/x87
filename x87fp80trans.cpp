@@ -1839,9 +1839,11 @@ uint16_t fp80_t::x87_fsincos(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
         case 2: sin_r = s_ext; sin_r.chs(); cos_r = c_ext; cos_r.chs(); break;
         case 3: sin_r = c_ext; sin_r.chs(); cos_r = s_ext;            break;
     }
-    uint16_t f1 = flags, f2 = flags;
-    dst1 = round_fpext96_to_fp80(cos_r, read_x87_cw(), f1);
-    dst2 = round_fpext96_to_fp80(sin_r, read_x87_cw(), f2);
+    // Both rounds share the input flags so C1/PE from either rounding
+    // reaches the returned status word (Intel exposes the final-result
+    // C1; merging the two is the cheapest match).
+    dst1 = round_fpext96_to_fp80(cos_r, read_x87_cw(), flags);
+    dst2 = round_fpext96_to_fp80(sin_r, read_x87_cw(), flags);
     flags |= X87SW_PRECISION_EX;
     if (dst1.isdenorm() || dst1.iszero() || dst2.isdenorm() || dst2.iszero())
         flags |= X87SW_UNDERFLOW_EX;
