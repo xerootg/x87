@@ -388,13 +388,20 @@ tiny:
         return 0;
     }
 
-    // denorms and other tiny values reduce to a simple multiply
-    dst = (fpext_t(src) * fpext_t::ln2).as_fp80();
-    if (src.isdenorm())
-        return X87SW_PRECISION_EX | X87SW_DENORM_EX | X87SW_UNDERFLOW_EX;
-    else if (exponent <= 1 - FP80_EXPONENT_BIAS)
-        return X87SW_PRECISION_EX | X87SW_UNDERFLOW_EX;
-    return X87SW_PRECISION_EX;
+    // Tiny values reduce to src * ln(2). Route the multiply through
+    // round_fpext96_to_fp80 so C1, UE, and precision-mode handling come
+    // from the canonical rounding helper rather than ad-hoc input-
+    // exponent heuristics. (Previously this path blindly set UE based on
+    // the input exponent — wrong when the result remained normal — and
+    // never set C1 — wrong when the rounding actually went up.)
+    {
+        uint16_t flags = 0;
+        if (src.isdenorm()) flags |= X87SW_DENORM_EX;
+        dst = round_fpext96_to_fp80(fpext_t(src) * fpext_t::ln2, read_x87_cw(), flags);
+        flags |= X87SW_PRECISION_EX;
+        if (dst.isdenorm() || dst.iszero()) flags |= X87SW_UNDERFLOW_EX;
+        return flags;
+    }
 }
 
 #if X87_HOST_HAS_FP80

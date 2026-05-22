@@ -431,6 +431,18 @@ template<> inline fpext96_t const fpext96_t::pio4 (0xc90fdaa22168c234ull, 0xc4c6
 template<> inline fpext96_t const fpext96_t::lg2  (0x9a209a84fbcff798ull, 0x8f8959ac, -2, 0);
 template<> inline fpext96_t const fpext96_t::ln2  (0xb17217f7d1cf79abull, 0xc9e3b398, -1, 0);
 
+template<> inline fpext128_t const fpext128_t::zero (0x0000000000000000ull, 0x0000000000000000ull, fpext128_t::EXPONENT_MIN, 0, fpext128_t::low64_tag{});
+template<> inline fpext128_t const fpext128_t::nzero(0x0000000000000000ull, 0x0000000000000000ull, fpext128_t::EXPONENT_MIN, 1, fpext128_t::low64_tag{});
+template<> inline fpext128_t const fpext128_t::one  (0x8000000000000000ull, 0x0000000000000000ull,  0, 0, fpext128_t::low64_tag{});
+template<> inline fpext128_t const fpext128_t::none (0x8000000000000000ull, 0x0000000000000000ull,  0, 1, fpext128_t::low64_tag{});
+template<> inline fpext128_t const fpext128_t::l2t  (0xd49a784bcd1b8afeull, 0x492bf6ff0e7e1f80ull,  1, 0, fpext128_t::low64_tag{});
+template<> inline fpext128_t const fpext128_t::l2e  (0xb8aa3b295c17f0bbull, 0xbe87fed0691d3e88ull,  0, 0, fpext128_t::low64_tag{});
+template<> inline fpext128_t const fpext128_t::pi   (0xc90fdaa22168c234ull, 0xc4c6628b80dc1cd1ull,  1, 0, fpext128_t::low64_tag{});
+template<> inline fpext128_t const fpext128_t::pio2 (0xc90fdaa22168c234ull, 0xc4c6628b80dc1cd1ull,  0, 0, fpext128_t::low64_tag{});
+template<> inline fpext128_t const fpext128_t::pio4 (0xc90fdaa22168c234ull, 0xc4c6628b80dc1cd1ull, -1, 0, fpext128_t::low64_tag{});
+template<> inline fpext128_t const fpext128_t::lg2  (0x9a209a84fbcff798ull, 0x8f8959ac0b7c9178ull, -2, 0, fpext128_t::low64_tag{});
+template<> inline fpext128_t const fpext128_t::ln2  (0xb17217f7d1cf79abull, 0xc9e3b39803f2f6afull, -1, 0, fpext128_t::low64_tag{});
+
 
 
 //
