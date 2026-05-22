@@ -1409,6 +1409,21 @@ uint16_t fp80_t::x87_fsqrt(fp80_t const &src, fp80_t &dst)
     uint32_t res_ext  = uint32_t(result128 & 0xFFFFFFFFu);
     if (remainder != 0 || extra_inexact) res_ext |= 1;
 
+    // For the even-exp case we right-shifted mant by 1 (losing its LSB
+    // into extra_inexact). The sqrt of the *shifted* input is half an
+    // fp80 ULP below the sqrt of the *true* input, so the Q we computed
+    // sits one half-ULP too low when extra_inexact is set. Compensate
+    // by adding 0.5 fp80 ULPs (= 2^31 of the 96-bit value) before
+    // rounding, so round_fpext96_to_fp80's C1 detection reflects the
+    // true-value rounding direction instead of the shifted-value one.
+    if (extra_inexact)
+    {
+        uint64_t old_ext = res_ext;
+        res_ext += 0x80000000u;
+        if (res_ext < old_ext)   // carry into mantissa
+            res_mant += 1;
+    }
+
     fpext96_t r(res_mant, res_ext, result_exp, 0);
     dst = round_fpext96_to_fp80(r, read_x87_cw(), flags);
     return flags;
