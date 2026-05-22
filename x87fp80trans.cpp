@@ -127,6 +127,7 @@ namespace x87
 
 // From x87fp80.cpp — properly rounded fpext96_t -> fp80 conversion + CW reader.
 extern fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &out_sw);
+extern fp80_t round_fpext128_to_fp80(fpext128_t const &v, x87cw_t cw, uint16_t &out_sw);
 extern x87cw_t read_x87_cw();
 
 //
@@ -397,7 +398,16 @@ tiny:
     {
         uint16_t flags = 0;
         if (src.isdenorm()) flags |= X87SW_DENORM_EX;
-        dst = round_fpext96_to_fp80(fpext_t(src) * fpext_t::ln2, read_x87_cw(), flags);
+        // Pentium-truncated ln(2): only 2 bits of fraction below the 64-bit
+        // mantissa boundary (Bochs fpu_constant.h Pentium mode, ~67-bit
+        // precision). Intel's microcode uses this specific truncated
+        // constant, so matching it gives bit-exact f2xm1 results for the
+        // tiny-input path instead of fighting against an irreproducible
+        // full-precision residual.
+        static fpext128_t const pentium_ln2(
+            0xb17217f7d1cf79abull, 0xc000000000000000ull, -1, 0, fpext128_t::low64_tag{});
+        fpext128_t prod = fpext128_t(src) * pentium_ln2;
+        dst = round_fpext128_to_fp80(prod, read_x87_cw(), flags);
         flags |= X87SW_PRECISION_EX;
         if (dst.isdenorm() || dst.iszero()) flags |= X87SW_UNDERFLOW_EX;
         return flags;
@@ -1170,51 +1180,50 @@ namespace {
 
 // Shared fyl2x polynomial core. Caller supplies the value as a
 // pre-extracted (mantissa-in-[1,2), integer-exponent) pair so fyl2xp1
-// can feed it (1 + src1) computed in fpext96 — sidestepping the
+// can feed it (1 + src1) computed in fpext128 — sidestepping the
 // fadd(src1, 1) cancellation that limits precision when src1 is close
 // to -1.
-inline uint16_t fyl2x_polynomial(fpext96_t const &m, int k,
+//
+// Operates in fpext128 (64+64 = 128 bits) so the residual reaching
+// round_fpext128_to_fp80 carries 32 extra "true value" bits below the
+// fp80 mantissa, giving an honest C1 decision instead of one guessed
+// from a 32-bit-ext truncation.
+inline uint16_t fyl2x_polynomial(fpext128_t const &m, int k,
                                   fp80_t const &src2, fp80_t &dst,
                                   uint16_t flags)
 {
-    using fpext_t = fpext96_t;
+    using fpext_t = fpext128_t;
 
-    fpext_t one(0x8000000000000000ull, 0x00000000, 0, 0);
+    static fpext_t const one_v(0x8000000000000000ull, 0x0000000000000000ull, 0, 0, fpext128_t::low64_tag{});
 
-    // s = (m - 1) / (m + 1) — fpext96 Newton-Raphson divide
-    fpext_t numer; numer.sub(m, one);
-    fpext_t denom; denom.add(m, one);
+    fpext_t numer; numer.sub(m, one_v);
+    fpext_t denom; denom.add(m, one_v);
     fpext_t s = numer.div(denom);
     fpext_t s2 = s * s;
 
-    static fpext_t const c1_3 (0xaaaaaaaaaaaaaaaaull, 0xaaaaaaab, -2, 0);
-    static fpext_t const c1_5 (0xccccccccccccccccull, 0xcccccccd, -3, 0);
-    static fpext_t const c1_7 (0x9249249249249249ull, 0x24924925, -3, 0);
-    static fpext_t const c1_9 (0xe38e38e38e38e38eull, 0x38e38e39, -4, 0);
-    static fpext_t const c1_11(0xba2e8ba2e8ba2e8bull, 0xa2e8ba2f, -4, 0);
-    static fpext_t const c1_13(0x9d89d89d89d89d89ull, 0xd89d89d9, -4, 0);
-    static fpext_t const c1_15(0x8888888888888888ull, 0x88888889, -4, 0);
-    static fpext_t const c1_17(0xf0f0f0f0f0f0f0f0ull, 0xf0f0f0f1, -5, 0);
-    static fpext_t const c1_19(0xd79435e50d79435eull, 0x50d79435, -5, 0);
-    static fpext_t const c1_21(0xc30c30c30c30c30cull, 0x30c30c30, -5, 0);
-    static fpext_t const c1_23(0xb21642c8590b2164ull, 0x2c8590b2, -5, 0);
-    static fpext_t const c1_25(0xa3d70a3d70a3d70aull, 0x3d70a3d7, -5, 0);
-    static fpext_t const c1_27(0x97b425ed097b425eull, 0xd097b426, -5, 0);
-    static fpext_t const c1_29(0x8d3dcb08d3dcb08dull, 0x3dcb08d4, -5, 0);
-    static fpext_t const c1_31(0x8421084210842108ull, 0x42108421, -5, 0);
-    // Extra higher-order terms: for fyl2xp1 inputs with src1 close to
-    // -1, |s| = src1/(src1+2) approaches 1 and the standard 14-term
-    // truncation only delivers ~21-bit precision. Going out to c1_47
-    // pushes that to ~37 bits, enough to close the last few-ULP
-    // mantissa gaps that the failure dump showed for src1 ≈ -0.75.
-    static fpext_t const c1_33(0xf83e0f83e0f83e0full, 0x83e0f83e, -6, 0);
-    static fpext_t const c1_35(0xea0ea0ea0ea0ea0eull, 0xa0ea0ea1, -6, 0);
-    static fpext_t const c1_37(0xdd67c8a60dd67c8aull, 0x60dd67c9, -6, 0);
-    static fpext_t const c1_39(0xd20d20d20d20d20dull, 0x20d20d21, -6, 0);
-    static fpext_t const c1_41(0xc7ce0c7ce0c7ce0cull, 0x7ce0c7ce, -6, 0);
-    static fpext_t const c1_43(0xbe82fa0be82fa0beull, 0x82fa0be8, -6, 0);
-    static fpext_t const c1_45(0xb60b60b60b60b60bull, 0x60b60b61, -6, 0);
-    static fpext_t const c1_47(0xae4c415c9882b931ull, 0x0572620b, -6, 0);
+    static fpext_t const c1_3 (0xaaaaaaaaaaaaaaaaull, 0xaaaaaaaaaaaaaaabull, -2, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_5 (0xccccccccccccccccull, 0xcccccccccccccccdull, -3, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_7 (0x9249249249249249ull, 0x2492492492492492ull, -3, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_9 (0xe38e38e38e38e38eull, 0x38e38e38e38e38e4ull, -4, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_11(0xba2e8ba2e8ba2e8bull, 0xa2e8ba2e8ba2e8baull, -4, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_13(0x9d89d89d89d89d89ull, 0xd89d89d89d89d89eull, -4, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_15(0x8888888888888888ull, 0x8888888888888889ull, -4, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_17(0xf0f0f0f0f0f0f0f0ull, 0xf0f0f0f0f0f0f0f1ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_19(0xd79435e50d79435eull, 0x50d79435e50d7943ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_21(0xc30c30c30c30c30cull, 0x30c30c30c30c30c3ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_23(0xb21642c8590b2164ull, 0x2c8590b21642c859ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_25(0xa3d70a3d70a3d70aull, 0x3d70a3d70a3d70a4ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_27(0x97b425ed097b425eull, 0xd097b425ed097b42ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_29(0x8d3dcb08d3dcb08dull, 0x3dcb08d3dcb08d3eull, -5, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_31(0x8421084210842108ull, 0x4210842108421084ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_33(0xf83e0f83e0f83e0full, 0x83e0f83e0f83e0f8ull, -6, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_35(0xea0ea0ea0ea0ea0eull, 0xa0ea0ea0ea0ea0eaull, -6, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_37(0xdd67c8a60dd67c8aull, 0x60dd67c8a60dd67dull, -6, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_39(0xd20d20d20d20d20dull, 0x20d20d20d20d20d2ull, -6, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_41(0xc7ce0c7ce0c7ce0cull, 0x7ce0c7ce0c7ce0c8ull, -6, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_43(0xbe82fa0be82fa0beull, 0x82fa0be82fa0be83ull, -6, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_45(0xb60b60b60b60b60bull, 0x60b60b60b60b60b6ull, -6, 0, fpext128_t::low64_tag{});
+    static fpext_t const c1_47(0xae4c415c9882b931ull, 0x0572620ae4c415caull, -6, 0, fpext128_t::low64_tag{});
 
     fpext_t poly = c1_47 * s2 + c1_45;
     poly = poly * s2 + c1_43;
@@ -1239,15 +1248,14 @@ inline uint16_t fyl2x_polynomial(fpext96_t const &m, int k,
     poly = poly * s2 + c1_5;
     poly = poly * s2 + c1_3;
 
-    fpext_t two(0x8000000000000000ull, 0x00000000, 1, 0);
-    fpext_t two_s = two * s;
+    static fpext_t const two_v(0x8000000000000000ull, 0x0000000000000000ull, 1, 0, fpext128_t::low64_tag{});
+    fpext_t two_s = two_v * s;
     fpext_t s2_poly = s2 * poly;
     fpext_t correction = two_s * s2_poly;
     fpext_t logm;
     logm.add(two_s, correction);
 
-    static fpext_t const invln2(0xb8aa3b295c17f0bbull, 0xbe87fed0, 0, 0);
-    fpext_t log2_m = logm * invln2;
+    fpext_t log2_m = logm * fpext_t::l2e;   // l2e = log2(e) = 1/ln(2)
 
     fpext_t k_ext;
     if (k == 0)
@@ -1257,16 +1265,16 @@ inline uint16_t fyl2x_polynomial(fpext96_t const &m, int k,
         bool neg = k < 0;
         uint64_t a = neg ? -(uint64_t)k : (uint64_t)k;
         int sh = count_leading_zeros64(a);
-        k_ext = fpext_t(a << sh, 0, 63 - sh, neg ? 1 : 0);
+        k_ext = fpext_t(a << sh, uint64_t(0), 63 - sh, neg ? 1 : 0, fpext128_t::low64_tag{});
     }
     fpext_t log2_x;
     log2_x.add(k_ext, log2_m);
 
-    fpext_t s2_ext(src2);
-    fpext_t result = log2_x * s2_ext;
+    fpext_t src2_ext(src2);
+    fpext_t result = log2_x * src2_ext;
 
     flags |= X87SW_PRECISION_EX;
-    dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
+    dst = round_fpext128_to_fp80(result, read_x87_cw(), flags);
     if (dst.isdenorm() && !dst.iszero())
         flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
     return flags;
@@ -1395,7 +1403,7 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     }
     // m = mantissa with biased exponent 0x3FFF → in [1, 2).
     fp80_t m_fp80(mant_bits, uint16_t(FP80_EXPONENT_BIAS));
-    fpext_t m(m_fp80);
+    fpext128_t m(m_fp80);
 
     return fyl2x_polynomial(m, k, src2, dst, flags);
 }
@@ -1520,49 +1528,47 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
         return sub_flags | (flags & X87SW_DENORM_EX);
     }
 
-    // log(1 + x) via the (1+x - 1) / (1+x + 1) = x/(x+2) substitution.
-    // Compute s = src1 / (src1 + 2) in fpext96 using the Newton-Raphson
-    // divide so the polynomial input carries ~96 bits of precision rather
-    // than the ~64 bits the previous fp80 divide produced.
-    fpext_t one(0x8000000000000000ull, 0x00000000, 0, 0);
-    fpext_t two(0x8000000000000000ull, 0x00000000, 1, 0);
-    fpext_t src1_ext(src1);
-    fpext_t denom_ext; denom_ext.add(src1_ext, two);
+    // log(1 + x) via the (1+x - 1) / (1+x + 1) = x/(x+2) substitution
+    // computed in fpext128 (256-bit intermediate). The polynomial is
+    // identical to fyl2x's atanh series in u, with 22 terms (out to
+    // 1/47) for slow-convergence inputs (src1 near -1 where |u| → 1).
+    using fpext128 = fpext128_t;
+    static fpext128 const e_two(0x8000000000000000ull, 0x0000000000000000ull, 1, 0, fpext128_t::low64_tag{});
+    fpext128 src1_ext(src1);
+    fpext128 denom_ext; denom_ext.add(src1_ext, e_two);
     if (denom_ext.iszero())
     {
-        // src1 = -2; outside fyl2xp1 domain, fall back to fp64 oracle.
         return via_fp64_binary(src1, src2, dst, &fp64_t::x87_fyl2xp1);
     }
-    fpext_t s = src1_ext.div(denom_ext);
-    fpext_t s2 = s * s;
+    fpext128 s = src1_ext.div(denom_ext);
+    fpext128 s2 = s * s;
 
-    static fpext_t const c1_3 (0xaaaaaaaaaaaaaaaaull, 0xaaaaaaab, -2, 0);
-    static fpext_t const c1_5 (0xccccccccccccccccull, 0xcccccccd, -3, 0);
-    static fpext_t const c1_7 (0x9249249249249249ull, 0x24924925, -3, 0);
-    static fpext_t const c1_9 (0xe38e38e38e38e38eull, 0x38e38e39, -4, 0);
-    static fpext_t const c1_11(0xba2e8ba2e8ba2e8bull, 0xa2e8ba2f, -4, 0);
-    static fpext_t const c1_13(0x9d89d89d89d89d89ull, 0xd89d89d9, -4, 0);
-    static fpext_t const c1_15(0x8888888888888888ull, 0x88888889, -4, 0);
-    static fpext_t const c1_17(0xf0f0f0f0f0f0f0f0ull, 0xf0f0f0f1, -5, 0);
-    static fpext_t const c1_19(0xd79435e50d79435eull, 0x50d79435, -5, 0);
-    static fpext_t const c1_21(0xc30c30c30c30c30cull, 0x30c30c30, -5, 0);
-    static fpext_t const c1_23(0xb21642c8590b2164ull, 0x2c8590b2, -5, 0);
-    static fpext_t const c1_25(0xa3d70a3d70a3d70aull, 0x3d70a3d7, -5, 0);
-    static fpext_t const c1_27(0x97b425ed097b425eull, 0xd097b426, -5, 0);
-    static fpext_t const c1_29(0x8d3dcb08d3dcb08dull, 0x3dcb08d4, -5, 0);
-    static fpext_t const c1_31(0x8421084210842108ull, 0x42108421, -5, 0);
-    // Extra higher-order terms (see fyl2x_polynomial helper for context).
-    static fpext_t const c1_33(0xf83e0f83e0f83e0full, 0x83e0f83e, -6, 0);
-    static fpext_t const c1_35(0xea0ea0ea0ea0ea0eull, 0xa0ea0ea1, -6, 0);
-    static fpext_t const c1_37(0xdd67c8a60dd67c8aull, 0x60dd67c9, -6, 0);
-    static fpext_t const c1_39(0xd20d20d20d20d20dull, 0x20d20d21, -6, 0);
-    static fpext_t const c1_41(0xc7ce0c7ce0c7ce0cull, 0x7ce0c7ce, -6, 0);
-    static fpext_t const c1_43(0xbe82fa0be82fa0beull, 0x82fa0be8, -6, 0);
-    static fpext_t const c1_45(0xb60b60b60b60b60bull, 0x60b60b61, -6, 0);
-    static fpext_t const c1_47(0xae4c415c9882b931ull, 0x0572620b, -6, 0);
+    static fpext128 const c1_3 (0xaaaaaaaaaaaaaaaaull, 0xaaaaaaaaaaaaaaabull, -2, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_5 (0xccccccccccccccccull, 0xcccccccccccccccdull, -3, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_7 (0x9249249249249249ull, 0x2492492492492492ull, -3, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_9 (0xe38e38e38e38e38eull, 0x38e38e38e38e38e4ull, -4, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_11(0xba2e8ba2e8ba2e8bull, 0xa2e8ba2e8ba2e8baull, -4, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_13(0x9d89d89d89d89d89ull, 0xd89d89d89d89d89eull, -4, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_15(0x8888888888888888ull, 0x8888888888888889ull, -4, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_17(0xf0f0f0f0f0f0f0f0ull, 0xf0f0f0f0f0f0f0f1ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_19(0xd79435e50d79435eull, 0x50d79435e50d7943ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_21(0xc30c30c30c30c30cull, 0x30c30c30c30c30c3ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_23(0xb21642c8590b2164ull, 0x2c8590b21642c859ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_25(0xa3d70a3d70a3d70aull, 0x3d70a3d70a3d70a4ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_27(0x97b425ed097b425eull, 0xd097b425ed097b42ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_29(0x8d3dcb08d3dcb08dull, 0x3dcb08d3dcb08d3eull, -5, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_31(0x8421084210842108ull, 0x4210842108421084ull, -5, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_33(0xf83e0f83e0f83e0full, 0x83e0f83e0f83e0f8ull, -6, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_35(0xea0ea0ea0ea0ea0eull, 0xa0ea0ea0ea0ea0eaull, -6, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_37(0xdd67c8a60dd67c8aull, 0x60dd67c8a60dd67dull, -6, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_39(0xd20d20d20d20d20dull, 0x20d20d20d20d20d2ull, -6, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_41(0xc7ce0c7ce0c7ce0cull, 0x7ce0c7ce0c7ce0c8ull, -6, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_43(0xbe82fa0be82fa0beull, 0x82fa0be82fa0be83ull, -6, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_45(0xb60b60b60b60b60bull, 0x60b60b60b60b60b6ull, -6, 0, fpext128_t::low64_tag{});
+    static fpext128 const c1_47(0xae4c415c9882b931ull, 0x0572620ae4c415caull, -6, 0, fpext128_t::low64_tag{});
 
-    // Split form (same as fyl2x): log((1+s)/(1-s)) = 2s + 2s·(s²·Q(s²)).
-    fpext_t poly = c1_47 * s2 + c1_45;
+    // Split form: log((1+s)/(1-s)) = 2s + 2s·(s²·Q(s²))
+    fpext128 poly = c1_47 * s2 + c1_45;
     poly = poly * s2 + c1_43;
     poly = poly * s2 + c1_41;
     poly = poly * s2 + c1_39;
@@ -1584,28 +1590,22 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
     poly = poly * s2 + c1_7;
     poly = poly * s2 + c1_5;
     poly = poly * s2 + c1_3;
-    // poly = 1/3 + s²/5 + … (no constant-1)
 
-    fpext_t two_s = two * s;
-    fpext_t s2_poly = s2 * poly;
-    fpext_t correction = two_s * s2_poly;
-    fpext_t logm;
+    fpext128 two_s = e_two * s;
+    fpext128 s2_poly = s2 * poly;
+    fpext128 correction = two_s * s2_poly;
+    fpext128 logm;
     logm.add(two_s, correction);
 
-    // Multiply by 1/ln(2) instead of dividing by ln(2) — avoids div64's
-    // fp64-precision bottleneck (which can overflow for huge values).
-    static fpext_t const invln2(0xb8aa3b295c17f0bbull, 0xbe87fed0, 0, 0);
-    fpext_t log2_x = logm * invln2;
+    fpext128 log2_x = logm * fpext128::l2e;
 
-    fpext_t s2_ext(src2);
-    fpext_t result = log2_x * s2_ext;
+    fpext128 src2_ext(src2);
+    fpext128 result = log2_x * src2_ext;
 
-    dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
+    dst = round_fpext128_to_fp80(result, read_x87_cw(), flags);
     flags |= X87SW_PRECISION_EX;
     if (dst.isdenorm() && !dst.iszero())
         flags |= X87SW_UNDERFLOW_EX;
-    // If the result rounded to zero from non-zero inputs, that is also
-    // underflow.
     if (dst.iszero() && !src1.iszero() && !src2.iszero())
         flags |= X87SW_UNDERFLOW_EX;
     return flags;

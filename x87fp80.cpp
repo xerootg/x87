@@ -780,6 +780,168 @@ fp80_t round_fpext96_to_fp80(fpext96_t const &v, x87cw_t cw, uint16_t &out_sw)
     return fp80_t(mant, sign_bit | uint16_t(biased));
 }
 
+//===========================================================================
+//
+// round_fpext128_to_fp80: same contract as round_fpext96_to_fp80, but
+// the input carries a 64-bit extension instead of 32 — so the
+// round/sticky decision at the fp80 boundary sees 32 extra bits of
+// "true residual" below the kept mantissa. Used by the log/exp paths
+// that operate at fpext128 precision throughout: when our polynomial
+// chain is more accurate than fpext96 can express, the extra ext bits
+// flip the C1 decision from "round_fpext96 was guessing on truncated
+// info" to "round_fpext128 sees the real residual sign."
+//
+//===========================================================================
+fp80_t round_fpext128_to_fp80(fpext128_t const &v, x87cw_t cw, uint16_t &out_sw)
+{
+    bool neg = v.sign() != 0;
+    uint16_t sign_bit = neg ? FP80_SIGN_MASK : 0;
+    if (v.iszero()) return fp80_t(0, sign_bit);
+
+    uint64_t mant = v.mantissa();
+    uint64_t ext  = v.extend();
+    int      exp  = v.exponent();
+
+    x87cw_t rmode = cw & X87CW_ROUNDING_MASK;
+    x87cw_t pc    = cw & X87CW_PRECISION_MASK;
+
+    int keep_bits = (pc == X87CW_PRECISION_SINGLE) ? 24
+                  : (pc == X87CW_PRECISION_DOUBLE) ? 53
+                  : 64;
+    int drop_in_mant = 64 - keep_bits;
+
+    bool round, sticky;
+    if (drop_in_mant > 0)
+    {
+        round  = (mant >> (drop_in_mant - 1)) & 1;
+        uint64_t below_mask = (drop_in_mant >= 2) ? ((1ull << (drop_in_mant - 1)) - 1) : 0;
+        sticky = (mant & below_mask) != 0 || ext != 0;
+        mant  &= ~((1ull << drop_in_mant) - 1);
+    }
+    else  // drop_in_mant == 0, only the 64 extension bits below
+    {
+        round  = (ext >> 63) & 1;
+        sticky = (ext & 0x7FFFFFFFFFFFFFFFull) != 0;
+    }
+
+    bool inexact = round || sticky;
+    bool round_up = false;
+    if (inexact)
+    {
+        if (rmode == X87CW_ROUNDING_NEAREST)
+        {
+            uint64_t lsb = (drop_in_mant > 0) ? ((mant >> drop_in_mant) & 1) : (mant & 1);
+            round_up = round && (sticky || lsb);
+        }
+        else if (rmode == X87CW_ROUNDING_DOWN) round_up = neg;
+        else if (rmode == X87CW_ROUNDING_UP)   round_up = !neg;
+    }
+
+    if (round_up)
+    {
+        if (drop_in_mant > 0)
+            mant += (1ull << drop_in_mant);
+        else
+            mant += 1;
+        if (mant == 0)  // overflowed to 2.0
+        {
+            mant = FP80_EXPLICIT_ONE;
+            exp += 1;
+        }
+        out_sw |= X87SW_C1;
+    }
+    if (inexact) out_sw |= X87SW_PRECISION_EX;
+
+    int biased = exp + FP80_EXPONENT_BIAS;
+    if (biased >= FP80_EXPONENT_MAX_BIASED)
+    {
+        out_sw |= X87SW_OVERFLOW_EX | X87SW_PRECISION_EX;
+        bool to_max_finite =
+            rmode == X87CW_ROUNDING_ZERO ||
+            (rmode == X87CW_ROUNDING_DOWN && !neg) ||
+            (rmode == X87CW_ROUNDING_UP   && neg);
+        if (to_max_finite)
+        {
+            uint64_t maxm = ~((1ull << drop_in_mant) - 1);
+            out_sw &= ~X87SW_C1;
+            return fp80_t(maxm, sign_bit | uint16_t(FP80_EXPONENT_MAX_BIASED - 1));
+        }
+        out_sw |= X87SW_C1;
+        return fp80_t(FP80_EXPLICIT_ONE, sign_bit | FP80_EXPONENT_MAX_BIASED);
+    }
+    if (biased <= 0)
+    {
+        int shift = 1 - (v.exponent() + FP80_EXPONENT_BIAS);
+        uint64_t orig_mant = v.mantissa();
+        uint64_t orig_ext  = v.extend();
+        out_sw &= ~(X87SW_C1 | X87SW_PRECISION_EX | X87SW_UNDERFLOW_EX);
+        if (shift >= 64)
+        {
+            bool any_bits = (orig_mant != 0) || (orig_ext != 0);
+            if (any_bits)
+                out_sw |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+            bool away_directed =
+                (rmode == X87CW_ROUNDING_UP && !neg) ||
+                (rmode == X87CW_ROUNDING_DOWN && neg);
+            bool round_to_smallest = false;
+            if (rmode == X87CW_ROUNDING_NEAREST && shift == 64)
+            {
+                if (orig_mant > FP80_EXPLICIT_ONE ||
+                    (orig_mant == FP80_EXPLICIT_ONE && orig_ext != 0))
+                    round_to_smallest = true;
+            }
+            if ((away_directed || round_to_smallest) && any_bits)
+            {
+                out_sw |= X87SW_C1;
+                return fp80_t(1, sign_bit);
+            }
+            return fp80_t(0, sign_bit);
+        }
+        int combined_drop = drop_in_mant + shift;
+        // Round / sticky at the combined boundary. The "round bit" is at
+        // position (combined_drop - 1) of the 128-bit conceptual value where
+        // bits 64..127 are orig_mant and bits 0..63 are orig_ext.
+        auto bit_at = [&](int pos) -> bool {
+            if (pos < 0)   return false;
+            if (pos < 64)  return (orig_ext >> pos) & 1;
+            if (pos < 128) return (orig_mant >> (pos - 64)) & 1;
+            return false;
+        };
+        int round_pos = combined_drop - 1 + 64;
+        int lsb_pos   = combined_drop + 64;
+        bool d_round  = bit_at(round_pos);
+        bool d_sticky = false;
+        for (int p = 0; p < round_pos && !d_sticky; p++)
+            if (bit_at(p)) d_sticky = true;
+        bool d_inexact = d_round || d_sticky;
+        bool d_round_up = false;
+        if (d_inexact)
+        {
+            if (rmode == X87CW_ROUNDING_NEAREST)
+            {
+                bool d_lsb = (lsb_pos < 128) ? bit_at(lsb_pos) : false;
+                d_round_up = d_round && (d_sticky || d_lsb);
+            }
+            else if (rmode == X87CW_ROUNDING_DOWN) d_round_up = neg;
+            else if (rmode == X87CW_ROUNDING_UP)   d_round_up = !neg;
+        }
+
+        uint64_t result_mant;
+        if (combined_drop >= 64) result_mant = 0;
+        else                     result_mant = orig_mant >> combined_drop;
+        if (d_round_up)
+        {
+            result_mant += 1;
+            if (result_mant == FP80_EXPLICIT_ONE)
+                return fp80_t(result_mant, sign_bit | uint16_t(1));
+        }
+        if (d_inexact) out_sw |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+        if (d_round_up) out_sw |= X87SW_C1;
+        return fp80_t(result_mant, sign_bit);
+    }
+    return fp80_t(mant, sign_bit | uint16_t(biased));
+}
+
 
 //===========================================================================
 //
