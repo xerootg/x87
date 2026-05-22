@@ -336,6 +336,37 @@ public:
     void mul(fpextxx_t const &a, fpextxx_t const &b);
     fpextxx_t div64(fpextxx_t const &b) const { return fpextxx_t(this->as_fp64() / b.as_fp64()); }
 
+    // Newton-Raphson divide: seed reciprocal at fp64 precision (~53 bits)
+    // and iterate r' = r * (2 - b*r) until precision saturates at the
+    // working width. One iteration ≈ 96 bits, two ≈ 128 bits.
+    //
+    // The seed is computed by exponent-rescaling b into the fp64 normal
+    // range so we get a usable reciprocal even when b is well outside
+    // fp64's exponent range (the natural case for tiny denormals or
+    // large exponents fp64 can't represent). Without this rescaling
+    // 1/b would underflow / overflow inside the as_fp64 conversion and
+    // poison the Newton chain.
+    fpextxx_t div(fpextxx_t const &b) const
+    {
+        fpextxx_t one_v(0x8000000000000000ull, 0, 0, 0);
+        fpextxx_t two_v(0x8000000000000000ull, 0, 1, 0);
+        // Scale b's exponent into [-1, 0] for the fp64 seed: b' = b * 2^-e_b.
+        fpextxx_t b_scaled = b;
+        exponent_t orig_exp = b.exponent();
+        b_scaled.set_exponent(-1);
+        fpextxx_t r = one_v.div64(b_scaled);
+        // After scaling back the result is in fp64's normal range; reapply
+        // the original exponent to r via subtraction.
+        r.set_exponent(r.exponent() - orig_exp - 1);
+        for (int i = 0; i < 2; i++)
+        {
+            fpextxx_t br = b * r;
+            fpextxx_t adj; adj.sub(two_v, br);
+            r = r * adj;
+        }
+        return *this * r;
+    }
+
     //
     // static helpers
     //

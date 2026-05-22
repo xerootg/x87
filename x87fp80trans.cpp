@@ -1047,12 +1047,19 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     static fpext_t const T3P8(0x9a827999fcef3242ull, 0x00000000, 1, 0);
     static fpext_t const TP8 (0xd413cccfe7799211ull, 0x00000000, -2, 0);
 
-    // x = |src2 / src1| (fp80 division for full precision).
-    // x87_fdivr(a,b) computes a/b; we want src2/src1 so pass (src2, src1).
+    // x = |src2 / src1| computed in fpext96 (~96 bits) instead of fp80
+    // (~64 bits), so the polynomial input carries roughly 32 extra bits
+    // of precision and round_fpext96_to_fp80's C1 detection sees the
+    // honest residual rather than a quantized one.
+    fpext_t src1_ext(src1), src2_ext(src2);
+    fpext_t xext_signed = src2_ext.div(src1_ext);
+    bool inner_sign = (xext_signed.sign() != 0);
+    if (inner_sign) xext_signed.chs();
+    // Build the fp80 form too — some branches need it for special-case
+    // detection (overflow → ±π/2).
     fp80_t x_fp80;
-    fp80_t::x87_fdivr(src2, src1, x_fp80);   // x_fp80 = src2 / src1
-    bool inner_sign = (x_fp80.sign() != 0);
-    if (inner_sign) x_fp80 = fp80_t::chs(x_fp80);
+    fp80_t::x87_fdivr(src2, src1, x_fp80);
+    if (x_fp80.sign() != 0) x_fp80 = fp80_t::chs(x_fp80);
 
     fpext_t yext, xext;
 
@@ -1069,7 +1076,7 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     }
     else
     {
-        fpext_t x(x_fp80);
+        fpext_t const &x = xext_signed;
         auto fpext_gt = [](fpext_t const &a, fpext_t const &b) {
             if (a.exponent() != b.exponent()) return a.exponent() > b.exponent();
             if (a.mantissa() != b.mantissa()) return a.mantissa() > b.mantissa();
@@ -1078,48 +1085,28 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
         bool x_gt_t3p8 = fpext_gt(x, T3P8);
         bool x_gt_tp8  = fpext_gt(x, TP8);
         bool skip_poly = false;
+        fpext_t one_ext(0x8000000000000000ull, 0x00000000, 0, 0);
         if (x_gt_t3p8)
         {
             yext = pio2_80;
-            // xext = -1 / x   →   need fdivr(1, x) = 1/x.
-            fp80_t one = fp80_t::const_one();
-            fp80_t recip;
-            fp80_t::x87_fdivr(one, x_fp80, recip);   // recip = 1 / x
-            if (recip.isnan() || recip.isinf() || recip.iszero())
-            {
-                xext = fpext_t::zero;
-                skip_poly = true;
-            }
-            else
-            {
-                fpext_t r(recip);
-                r.chs();
-                xext = r;
-            }
+            // xext = -1 / x — compute 1/x in fpext96 directly.
+            xext = one_ext.div(x);
+            xext.chs();
         }
         else if (x_gt_tp8)
         {
             yext = pio4_80;
-            // xext = (x - 1) / (x + 1)
-            // x87_fsubr(a,b) = a - b; x87_fadd is symmetric; x87_fdivr(a,b) = a/b.
-            fp80_t one = fp80_t::const_one();
-            fp80_t num, denom, ratio;
-            fp80_t::x87_fsubr(x_fp80, one, num);     // num = x - 1
-            fp80_t::x87_fadd (x_fp80, one, denom);   // denom = x + 1
-            fp80_t::x87_fdivr(num, denom, ratio);    // ratio = num / denom
-            if (ratio.isnan() || ratio.isinf())
-            {
-                xext = fpext_t::zero;
-                skip_poly = true;
-            }
-            else if (ratio.iszero())
+            // xext = (x - 1) / (x + 1) in fpext96
+            fpext_t num; num.sub(x, one_ext);
+            fpext_t denom; denom.add(x, one_ext);
+            if (denom.iszero())
             {
                 xext = fpext_t::zero;
                 skip_poly = true;
             }
             else
             {
-                xext = fpext_t(ratio);
+                xext = num.div(denom);
             }
         }
         else
@@ -1295,7 +1282,7 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     // s = (m - 1) / (m + 1)
     fpext_t numer; numer.sub(m, one);
     fpext_t denom; denom.add(m, one);
-    fpext_t s = numer.div64(denom);
+    fpext_t s = numer.div(denom);
     fpext_t s2 = s * s;
 
     // log(m) = 2*s * (1 + s^2/3 + s^4/5 + s^6/7 + ...)
@@ -1487,7 +1474,7 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
         dst = src1;
         return flags | X87SW_PRECISION_EX | X87SW_DENORM_EX;
     }
-    if (src1_exp > -2)   // |src1| > ~0.25
+    if (src1_exp > -1)   // |src1| > ~0.5
     {
         fp80_t one_plus_x;
         fp80_t::x87_fadd(src1, fp80_t::const_one(), one_plus_x);
@@ -1498,20 +1485,19 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
     }
 
     // log(1 + x) via the (1+x - 1) / (1+x + 1) = x/(x+2) substitution.
-    fp80_t two_fp80(0x8000000000000000ull, 0x4000);   // 2.0
-    fp80_t denom_fp80;
-    fp80_t::x87_fadd(src1, two_fp80, denom_fp80);
-    fp80_t s_fp80;
-    fp80_t::x87_fdivr(src1, denom_fp80, s_fp80);   // s = src1 / denom
-    if (s_fp80.ismaxexp() || denom_fp80.ismaxexp())
-    {
-        // Numerical edge — fall back to via_fp64 to get something reasonable.
-        return via_fp64_binary(src1, src2, dst, &fp64_t::x87_fyl2xp1);
-    }
-
+    // Compute s = src1 / (src1 + 2) in fpext96 using the Newton-Raphson
+    // divide so the polynomial input carries ~96 bits of precision rather
+    // than the ~64 bits the previous fp80 divide produced.
     fpext_t one(0x8000000000000000ull, 0x00000000, 0, 0);
     fpext_t two(0x8000000000000000ull, 0x00000000, 1, 0);
-    fpext_t s(s_fp80);
+    fpext_t src1_ext(src1);
+    fpext_t denom_ext; denom_ext.add(src1_ext, two);
+    if (denom_ext.iszero())
+    {
+        // src1 = -2; outside fyl2xp1 domain, fall back to fp64 oracle.
+        return via_fp64_binary(src1, src2, dst, &fp64_t::x87_fyl2xp1);
+    }
+    fpext_t s = src1_ext.div(denom_ext);
     fpext_t s2 = s * s;
 
     static fpext_t const c1_3 (0xaaaaaaaaaaaaaaaaull, 0xaaaaaaab, -2, 0);
