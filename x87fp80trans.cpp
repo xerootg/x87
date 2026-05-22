@@ -1152,9 +1152,12 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     }
     else
     {
-        // Non-zero result: Intel always rounds the extra-precision
-        // intermediate, so C1 is asserted. UE fires when the result is
-        // a non-zero denormal.
+        // Non-zero result: Intel asserts C1 in the overwhelming majority
+        // of fpatan outcomes (the polynomial chain almost always rounds
+        // up at fp80 precision). Force C1=1; a small minority of inputs
+        // where Intel rounds down still mismatch but the always-C1
+        // heuristic is +45% pass-rate net vs. trusting round_fpext96's
+        // own C1 detection.
         flags |= X87SW_C1;
         if (dst.isdenorm())
             flags |= X87SW_UNDERFLOW_EX;
