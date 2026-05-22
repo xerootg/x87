@@ -1407,7 +1407,7 @@ uint16_t fp80_t::x87_fsqrt(fp80_t const &src, fp80_t &dst)
 
     uint64_t res_mant = uint64_t(result128 >> 32);
     uint32_t res_ext  = uint32_t(result128 & 0xFFFFFFFFu);
-    if (remainder != 0 || extra_inexact) res_ext |= 1;
+    if (remainder != 0) res_ext |= 1;
 
     // For the even-exp case we right-shifted mant by 1 (losing its LSB
     // into extra_inexact). The sqrt of the *shifted* input is half an
@@ -1416,6 +1416,8 @@ uint16_t fp80_t::x87_fsqrt(fp80_t const &src, fp80_t &dst)
     // by adding 0.5 fp80 ULPs (= 2^31 of the 96-bit value) before
     // rounding, so round_fpext96_to_fp80's C1 detection reflects the
     // true-value rounding direction instead of the shifted-value one.
+    // (The extra_inexact lifeline-sticky bit would double up with this
+    // correction and corrupt the tie case, so it is excluded above.)
     if (extra_inexact)
     {
         uint64_t old_ext = res_ext;
