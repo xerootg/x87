@@ -1202,8 +1202,29 @@ inline uint16_t fyl2x_polynomial(fpext96_t const &m, int k,
     static fpext_t const c1_27(0x97b425ed097b425eull, 0xd097b426, -5, 0);
     static fpext_t const c1_29(0x8d3dcb08d3dcb08dull, 0x3dcb08d4, -5, 0);
     static fpext_t const c1_31(0x8421084210842108ull, 0x42108421, -5, 0);
+    // Extra higher-order terms: for fyl2xp1 inputs with src1 close to
+    // -1, |s| = src1/(src1+2) approaches 1 and the standard 14-term
+    // truncation only delivers ~21-bit precision. Going out to c1_47
+    // pushes that to ~37 bits, enough to close the last few-ULP
+    // mantissa gaps that the failure dump showed for src1 ≈ -0.75.
+    static fpext_t const c1_33(0xf83e0f83e0f83e0full, 0x83e0f83e, -6, 0);
+    static fpext_t const c1_35(0xea0ea0ea0ea0ea0eull, 0xa0ea0ea1, -6, 0);
+    static fpext_t const c1_37(0xdd67c8a60dd67c8aull, 0x60dd67c9, -6, 0);
+    static fpext_t const c1_39(0xd20d20d20d20d20dull, 0x20d20d21, -6, 0);
+    static fpext_t const c1_41(0xc7ce0c7ce0c7ce0cull, 0x7ce0c7ce, -6, 0);
+    static fpext_t const c1_43(0xbe82fa0be82fa0beull, 0x82fa0be8, -6, 0);
+    static fpext_t const c1_45(0xb60b60b60b60b60bull, 0x60b60b61, -6, 0);
+    static fpext_t const c1_47(0xae4c415c9882b931ull, 0x0572620b, -6, 0);
 
-    fpext_t poly = c1_31 * s2 + c1_29;
+    fpext_t poly = c1_47 * s2 + c1_45;
+    poly = poly * s2 + c1_43;
+    poly = poly * s2 + c1_41;
+    poly = poly * s2 + c1_39;
+    poly = poly * s2 + c1_37;
+    poly = poly * s2 + c1_35;
+    poly = poly * s2 + c1_33;
+    poly = poly * s2 + c1_31;
+    poly = poly * s2 + c1_29;
     poly = poly * s2 + c1_27;
     poly = poly * s2 + c1_25;
     poly = poly * s2 + c1_23;
@@ -1530,9 +1551,26 @@ uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst
     static fpext_t const c1_27(0x97b425ed097b425eull, 0xd097b426, -5, 0);
     static fpext_t const c1_29(0x8d3dcb08d3dcb08dull, 0x3dcb08d4, -5, 0);
     static fpext_t const c1_31(0x8421084210842108ull, 0x42108421, -5, 0);
+    // Extra higher-order terms (see fyl2x_polynomial helper for context).
+    static fpext_t const c1_33(0xf83e0f83e0f83e0full, 0x83e0f83e, -6, 0);
+    static fpext_t const c1_35(0xea0ea0ea0ea0ea0eull, 0xa0ea0ea1, -6, 0);
+    static fpext_t const c1_37(0xdd67c8a60dd67c8aull, 0x60dd67c9, -6, 0);
+    static fpext_t const c1_39(0xd20d20d20d20d20dull, 0x20d20d21, -6, 0);
+    static fpext_t const c1_41(0xc7ce0c7ce0c7ce0cull, 0x7ce0c7ce, -6, 0);
+    static fpext_t const c1_43(0xbe82fa0be82fa0beull, 0x82fa0be8, -6, 0);
+    static fpext_t const c1_45(0xb60b60b60b60b60bull, 0x60b60b61, -6, 0);
+    static fpext_t const c1_47(0xae4c415c9882b931ull, 0x0572620b, -6, 0);
 
     // Split form (same as fyl2x): log((1+s)/(1-s)) = 2s + 2s·(s²·Q(s²)).
-    fpext_t poly = c1_31 * s2 + c1_29;
+    fpext_t poly = c1_47 * s2 + c1_45;
+    poly = poly * s2 + c1_43;
+    poly = poly * s2 + c1_41;
+    poly = poly * s2 + c1_39;
+    poly = poly * s2 + c1_37;
+    poly = poly * s2 + c1_35;
+    poly = poly * s2 + c1_33;
+    poly = poly * s2 + c1_31;
+    poly = poly * s2 + c1_29;
     poly = poly * s2 + c1_27;
     poly = poly * s2 + c1_25;
     poly = poly * s2 + c1_23;
