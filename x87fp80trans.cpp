@@ -1889,12 +1889,17 @@ uint16_t fp80_t::x87_fptan(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
         case 2: sin_r = s_ext; sin_r.chs(); cos_r = c_ext; cos_r.chs(); break;
         case 3: sin_r = c_ext; sin_r.chs(); cos_r = s_ext;            break;
     }
-    // tan = sin / cos via fp80 division.
-    uint16_t f_sin = flags, f_cos = flags;
-    fp80_t sin80 = round_fpext96_to_fp80(sin_r, read_x87_cw(), f_sin);
-    fp80_t cos80 = round_fpext96_to_fp80(cos_r, read_x87_cw(), f_cos);
-    fp80_t tan80;
-    fp80_t::x87_fdivr(sin80, cos80, tan80);   // tan = sin/cos
+    // tan = sin / cos in fpext96 so the quotient carries the polynomial's
+    // full precision, then rounded once to fp80 via the canonical helper.
+    if (cos_r.iszero())
+    {
+        // Tan is undefined at cos=0; pass through C2 to signal.
+        dst1 = fp80_t::const_one();
+        dst2 = src;
+        return flags | X87SW_C2;
+    }
+    fpext_t tan_ext = sin_r.div(cos_r);
+    fp80_t tan80 = round_fpext96_to_fp80(tan_ext, read_x87_cw(), flags);
     dst1 = fp80_t::const_one();
     dst2 = tan80;
     flags |= X87SW_PRECISION_EX;
