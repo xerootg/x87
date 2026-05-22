@@ -1166,6 +1166,93 @@ uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     return flags;
 }
 
+namespace {
+
+// Shared fyl2x polynomial core. Caller supplies the value as a
+// pre-extracted (mantissa-in-[1,2), integer-exponent) pair so fyl2xp1
+// can feed it (1 + src1) computed in fpext96 — sidestepping the
+// fadd(src1, 1) cancellation that limits precision when src1 is close
+// to -1.
+inline uint16_t fyl2x_polynomial(fpext96_t const &m, int k,
+                                  fp80_t const &src2, fp80_t &dst,
+                                  uint16_t flags)
+{
+    using fpext_t = fpext96_t;
+
+    fpext_t one(0x8000000000000000ull, 0x00000000, 0, 0);
+
+    // s = (m - 1) / (m + 1) — fpext96 Newton-Raphson divide
+    fpext_t numer; numer.sub(m, one);
+    fpext_t denom; denom.add(m, one);
+    fpext_t s = numer.div(denom);
+    fpext_t s2 = s * s;
+
+    static fpext_t const c1_3 (0xaaaaaaaaaaaaaaaaull, 0xaaaaaaab, -2, 0);
+    static fpext_t const c1_5 (0xccccccccccccccccull, 0xcccccccd, -3, 0);
+    static fpext_t const c1_7 (0x9249249249249249ull, 0x24924925, -3, 0);
+    static fpext_t const c1_9 (0xe38e38e38e38e38eull, 0x38e38e39, -4, 0);
+    static fpext_t const c1_11(0xba2e8ba2e8ba2e8bull, 0xa2e8ba2f, -4, 0);
+    static fpext_t const c1_13(0x9d89d89d89d89d89ull, 0xd89d89d9, -4, 0);
+    static fpext_t const c1_15(0x8888888888888888ull, 0x88888889, -4, 0);
+    static fpext_t const c1_17(0xf0f0f0f0f0f0f0f0ull, 0xf0f0f0f1, -5, 0);
+    static fpext_t const c1_19(0xd79435e50d79435eull, 0x50d79435, -5, 0);
+    static fpext_t const c1_21(0xc30c30c30c30c30cull, 0x30c30c30, -5, 0);
+    static fpext_t const c1_23(0xb21642c8590b2164ull, 0x2c8590b2, -5, 0);
+    static fpext_t const c1_25(0xa3d70a3d70a3d70aull, 0x3d70a3d7, -5, 0);
+    static fpext_t const c1_27(0x97b425ed097b425eull, 0xd097b426, -5, 0);
+    static fpext_t const c1_29(0x8d3dcb08d3dcb08dull, 0x3dcb08d4, -5, 0);
+    static fpext_t const c1_31(0x8421084210842108ull, 0x42108421, -5, 0);
+
+    fpext_t poly = c1_31 * s2 + c1_29;
+    poly = poly * s2 + c1_27;
+    poly = poly * s2 + c1_25;
+    poly = poly * s2 + c1_23;
+    poly = poly * s2 + c1_21;
+    poly = poly * s2 + c1_19;
+    poly = poly * s2 + c1_17;
+    poly = poly * s2 + c1_15;
+    poly = poly * s2 + c1_13;
+    poly = poly * s2 + c1_11;
+    poly = poly * s2 + c1_9;
+    poly = poly * s2 + c1_7;
+    poly = poly * s2 + c1_5;
+    poly = poly * s2 + c1_3;
+
+    fpext_t two(0x8000000000000000ull, 0x00000000, 1, 0);
+    fpext_t two_s = two * s;
+    fpext_t s2_poly = s2 * poly;
+    fpext_t correction = two_s * s2_poly;
+    fpext_t logm;
+    logm.add(two_s, correction);
+
+    static fpext_t const invln2(0xb8aa3b295c17f0bbull, 0xbe87fed0, 0, 0);
+    fpext_t log2_m = logm * invln2;
+
+    fpext_t k_ext;
+    if (k == 0)
+        k_ext = fpext_t::zero;
+    else
+    {
+        bool neg = k < 0;
+        uint64_t a = neg ? -(uint64_t)k : (uint64_t)k;
+        int sh = count_leading_zeros64(a);
+        k_ext = fpext_t(a << sh, 0, 63 - sh, neg ? 1 : 0);
+    }
+    fpext_t log2_x;
+    log2_x.add(k_ext, log2_m);
+
+    fpext_t s2_ext(src2);
+    fpext_t result = log2_x * s2_ext;
+
+    flags |= X87SW_PRECISION_EX;
+    dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
+    if (dst.isdenorm() && !dst.iszero())
+        flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
+    return flags;
+}
+
+}  // namespace
+
 //
 // fyl2x: compute src2 * log2(src1).  fdlibm-derived algorithm: reduce
 // src1 to mantissa m and integer exponent k where m ∈ [1, 2), then
@@ -1267,8 +1354,6 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     //
     // We compute log_e via the (m-1)/(m+1) substitution, then multiply by 1/ln(2).
 
-    fpext_t one(0x8000000000000000ull, 0x00000000, 0, 0);
-
     // Extract exponent k and mantissa m = src1 / 2^k where m ∈ [1, 2).
     int k = (src1.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS;
     uint64_t mant_bits = src1.mantissa();
@@ -1282,89 +1367,7 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
     fp80_t m_fp80(mant_bits, uint16_t(FP80_EXPONENT_BIAS));
     fpext_t m(m_fp80);
 
-    // s = (m - 1) / (m + 1)
-    fpext_t numer; numer.sub(m, one);
-    fpext_t denom; denom.add(m, one);
-    fpext_t s = numer.div(denom);
-    fpext_t s2 = s * s;
-
-    // log(m) = 2*s * (1 + s^2/3 + s^4/5 + s^6/7 + ...)
-    // Extended Horner — at worst |s| ≈ 1/3 (when m approaches 2), so each
-    // higher term reduces the truncation error by a factor of 9. Going out
-    // to 1/23 gives ~37-bit truncation, well below the 32-bit fpext96
-    // extension boundary.
-    static fpext_t const c1_3 (0xaaaaaaaaaaaaaaaaull, 0xaaaaaaab, -2, 0);
-    static fpext_t const c1_5 (0xccccccccccccccccull, 0xcccccccd, -3, 0);
-    static fpext_t const c1_7 (0x9249249249249249ull, 0x24924925, -3, 0);
-    static fpext_t const c1_9 (0xe38e38e38e38e38eull, 0x38e38e39, -4, 0);
-    static fpext_t const c1_11(0xba2e8ba2e8ba2e8bull, 0xa2e8ba2f, -4, 0);
-    static fpext_t const c1_13(0x9d89d89d89d89d89ull, 0xd89d89d9, -4, 0);
-    static fpext_t const c1_15(0x8888888888888888ull, 0x88888889, -4, 0);
-    static fpext_t const c1_17(0xf0f0f0f0f0f0f0f0ull, 0xf0f0f0f1, -5, 0);
-    static fpext_t const c1_19(0xd79435e50d79435eull, 0x50d79435, -5, 0);
-    static fpext_t const c1_21(0xc30c30c30c30c30cull, 0x30c30c30, -5, 0);
-    static fpext_t const c1_23(0xb21642c8590b2164ull, 0x2c8590b2, -5, 0);
-    static fpext_t const c1_25(0xa3d70a3d70a3d70aull, 0x3d70a3d7, -5, 0);
-    static fpext_t const c1_27(0x97b425ed097b425eull, 0xd097b426, -5, 0);
-    static fpext_t const c1_29(0x8d3dcb08d3dcb08dull, 0x3dcb08d4, -5, 0);
-    static fpext_t const c1_31(0x8421084210842108ull, 0x42108421, -5, 0);
-
-    // Split form: log((1+s)/(1-s)) = 2s + 2s · (s² · Q(s²))
-    // where Q(z) = 1/3 + z/5 + z²/7 + … (no constant-1 term).
-    // Same insight as fsin/fpatan — keep the dominant linear term out of
-    // the polynomial summation for better small-argument behavior.
-    fpext_t poly = c1_31 * s2 + c1_29;
-    poly = poly * s2 + c1_27;
-    poly = poly * s2 + c1_25;
-    poly = poly * s2 + c1_23;
-    poly = poly * s2 + c1_21;
-    poly = poly * s2 + c1_19;
-    poly = poly * s2 + c1_17;
-    poly = poly * s2 + c1_15;
-    poly = poly * s2 + c1_13;
-    poly = poly * s2 + c1_11;
-    poly = poly * s2 + c1_9;
-    poly = poly * s2 + c1_7;
-    poly = poly * s2 + c1_5;
-    poly = poly * s2 + c1_3;
-    // poly now = 1/3 + s²/5 + … (no constant-1)
-
-    fpext_t two(0x8000000000000000ull, 0x00000000, 1, 0);
-    fpext_t two_s = two * s;             // 2s
-    fpext_t s2_poly = s2 * poly;         // s² · Q(s²)
-    fpext_t correction = two_s * s2_poly;
-    fpext_t logm;
-    logm.add(two_s, correction);          // 2s + 2s · (s² · Q(s²))
-
-    // log2(m) = log(m) * (1/ln(2))
-    static fpext_t const invln2(0xb8aa3b295c17f0bbull, 0xbe87fed0, 0, 0);
-    fpext_t log2_m = logm * invln2;
-
-    // log2(src1) = k + log2(m)
-    fpext_t k_ext;
-    {
-        // Build fpext from integer k.
-        if (k == 0)        k_ext = fpext_t::zero;
-        else
-        {
-            bool neg = k < 0;
-            uint64_t a = neg ? -(uint64_t)k : (uint64_t)k;
-            int sh = count_leading_zeros64(a);
-            k_ext = fpext_t(a << sh, 0, 63 - sh, neg ? 1 : 0);
-        }
-    }
-    fpext_t log2_x;
-    log2_x.add(k_ext, log2_m);
-
-    // result = src2 * log2(src1)
-    fpext_t s2_ext(src2);
-    fpext_t result = log2_x * s2_ext;
-
-    flags |= X87SW_PRECISION_EX;
-    dst = round_fpext96_to_fp80(result, read_x87_cw(), flags);
-    if (dst.isdenorm() && !dst.iszero())
-        flags |= X87SW_UNDERFLOW_EX | X87SW_PRECISION_EX;
-    return flags;
+    return fyl2x_polynomial(m, k, src2, dst, flags);
 }
 
 //
