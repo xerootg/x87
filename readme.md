@@ -28,7 +28,7 @@ Matching Intel x87 hardware bit-exactly (mantissa + full status word) across the
 | FSIN / FCOS | ~80% |
 | FPATAN | 80% |
 | FPTAN | ~72% per output |
-| FYL2XP1 | 66% |
+| FYL2XP1 | 67% |
 | FSINCOS | ~66% per output |
 
 The transcendentals' remaining gaps are almost entirely in the C1 (rounding-direction) status word bit — the mantissa values match Intel hardware in nearly every test case. Two empirical findings shape the implementation:
