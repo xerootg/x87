@@ -23,14 +23,14 @@ Matching Intel x87 hardware bit-exactly (mantissa + full status word) across the
 | FADD / FSUB / FSUBR / FMUL / FDIV / FDIVR | 100% |
 | FSCALE / FPREM / FPREM1 | 100% |
 | FSQRT | 99.9% |
+| FSINCOS | 98.7% per output |
 | FCOS | 98.4% |
 | FSIN | 97.8% |
+| FPTAN | 97.4% per output |
 | FYL2X | 95% |
 | F2XM1 | 93% |
-| FSINCOS | ~86% per output |
-| FPTAN | ~84% per output |
+| FYL2XP1 | 91% |
 | FPATAN | 80% |
-| FYL2XP1 | 67% |
 
 The transcendentals' remaining gaps are almost entirely in the C1 (rounding-direction) status word bit — the mantissa values match Intel hardware in nearly every test case. Two empirical findings shape the implementation:
 
@@ -39,6 +39,7 @@ The transcendentals' remaining gaps are almost entirely in the C1 (rounding-dire
 - A Newton-Raphson `fpextxx_t::div` (exponent-rescaled fp64 seed, two iterations) replaces the previous fp64-precision `div64` in the log substitution chain `s = (m-1)/(m+1)` and atan's `src2/src1`. Capping divisor precision at 53 bits silently caps the whole polynomial output at 53 bits; the fix lifted fyl2xp1 by ~11 points, fyl2x by ~2, fpatan by ~0.4. (fp64 div64 is fine for the host-x86 reference path, but for the hand-rolled fpext96 polynomial it was the bottleneck.)
 - The fsqrt shift-and-subtract has an even-exponent path that right-shifts mant by 1 to keep `(exp - 63)` even. The lost LSB sat as a sticky-lifeline bit, but the shifted-input sqrt's mantissa lands half an fp80 ULP below the true-input sqrt — so the post-round C1 reflects the shifted rounding direction, not the actual one. Adding 0.5 fp80 ULPs to the 96-bit result before the final round (and dropping the now-redundant lifeline-sticky) moved fsqrt from 82% to 99.9%.
 - The dominant lever turned out to be **Pentium-truncated constants**. Bochs's fpu/fpu_constant.h documents that Intel's x87 microcode internally uses lower-precision approximations of π, π/2, ln(2), and 1/ln(2) — the 64-bit mantissa is correct but only the top 2 bits of the next 64 bits are kept (the "0xC000…" pattern). Plugging the truncated constant in where Intel's microcode uses it produces a residual at the fp80 rounding boundary that matches Intel's, which is what drives C1. Concretely: Pentium-truncated π/2 in trig range_reduce took fsin from 80% to 98%; Pentium-truncated ln(2) in f2xm1's tiny path and main path took it from 89% to 93%. Higher precision actively *hurts* in those slots because it diverges from the residual Intel produces.
+- Several structural flag/output bugs were found by an SW-bit-frequency breakdown of the failing cases. (a) fyl2xp1's two out-of-domain branches (negative src1 with |src1|≥1) were OR-ing X87SW_DENORM_EX unconditionally; the DE flag should only fire when an operand is actually denormal. Removing the spurious DE lifted fyl2xp1 from 67% to 91%. (b) fsincos and fptan both wrote `dst2 = src` in the |src|>2^63 out-of-range branch; the asm wrapper does `fldz; fld src;` before the instruction so ST(1) stays 0 and the test expects `dst2 = 0` (the preserved ST(1)). Fix lifted fsincos from 86% to 98.7% per output, and fptan from 84% to 97.4% per output.
 
 ## Microarchitecture quirk: Pentium-truncated constants
 
