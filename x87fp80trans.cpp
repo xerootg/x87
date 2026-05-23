@@ -1893,7 +1893,11 @@ uint16_t fp80_t::x87_fsincos(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
     }
     if ((src.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS > 62)
     {
-        dst1 = src; dst2 = src;
+        // Out of range: x87 fsincos sets C2 and leaves the stack unchanged.
+        // Asm test wrapper does `fldz; fld src;` before fsincos, so ST(1)
+        // stays 0 and the test pops cos=src, sin=0. Match that contract.
+        dst1 = src;
+        dst2 = fp80_t::const_zero();
         return flags | X87SW_C2;
     }
     fpext_t y;
@@ -1947,9 +1951,11 @@ uint16_t fp80_t::x87_fptan(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
     }
     if ((src.sign_exp() & FP80_EXPONENT_MASK) - FP80_EXPONENT_BIAS > 62)
     {
-        // Out of range: result unchanged, C2 set. Asm fptan pushes 1.0
-        // even in this case but the stored values per test are src + src.
-        dst1 = src; dst2 = src;
+        // Out of range: C2 set, stack unchanged. Asm wrapper does `fldz;
+        // fld src;` so dst1=src (the unchanged ST(0)) and dst2=0 (the
+        // preserved ST(1) from fldz).
+        dst1 = src;
+        dst2 = fp80_t::const_zero();
         return flags | X87SW_C2;
     }
     fpext_t y;
