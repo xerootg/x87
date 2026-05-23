@@ -294,8 +294,10 @@ using fpextfast_t = fpext64_t;
         fpextfast_t v = fpextfast_t(src) - s_table_u[g_index + R];
 
         // multiply v by ln(2) so we can use the e^x Taylor series; do this in
-        // extended precision
-        fpext_t w = fpext_t(v) * fpext_t::ln2;
+        // extended precision with Pentium-truncated ln(2) so the residual
+        // matches Intel's microcode chain.
+        static fpext_t const pentium_ln2(0xb17217f7d1cf79abull, 0xc0000000, -1, 0);
+        fpext_t w = fpext_t(v) * pentium_ln2;
         if (Debug) print_val("w", w);
 
         // Taylor series: this can be done in lower precision; start with h = w + coeff[0]
