@@ -40,6 +40,21 @@ The transcendentals' remaining gaps are almost entirely in the C1 (rounding-dire
 - The fsqrt shift-and-subtract has an even-exponent path that right-shifts mant by 1 to keep `(exp - 63)` even. The lost LSB sat as a sticky-lifeline bit, but the shifted-input sqrt's mantissa lands half an fp80 ULP below the true-input sqrt — so the post-round C1 reflects the shifted rounding direction, not the actual one. Adding 0.5 fp80 ULPs to the 96-bit result before the final round (and dropping the now-redundant lifeline-sticky) moved fsqrt from 82% to 99.9%.
 - The dominant lever turned out to be **Pentium-truncated constants**. Bochs's fpu/fpu_constant.h documents that Intel's x87 microcode internally uses lower-precision approximations of π, π/2, ln(2), and 1/ln(2) — the 64-bit mantissa is correct but only the top 2 bits of the next 64 bits are kept (the "0xC000…" pattern). Plugging the truncated constant in where Intel's microcode uses it produces a residual at the fp80 rounding boundary that matches Intel's, which is what drives C1. Concretely: Pentium-truncated π/2 in trig range_reduce took fsin from 80% to 98%; Pentium-truncated ln(2) in f2xm1's tiny path and main path took it from 89% to 93%. Higher precision actively *hurts* in those slots because it diverges from the residual Intel produces.
 
+## Microarchitecture quirk: Pentium-truncated constants
+
+Modern Intel x87 hardware (verified on the test laptop) still uses **Pentium-truncated** internal constants for π/2 (in trig argument reduction) and ln(2) (in `f2xm1`): the 64-bit fp80 mantissa with only the top 2 bits of the next 64 set (the "0xC000…" pattern, ~66 bits of precision). Substituting the full-precision continuation bits (e.g. `0xC4C6628C…` for π/2, `0xC9E3F39B…` for ln(2)) produces a different residual at the fp80 rounding boundary and hurts the C1 (round-up) status bit match rate.
+
+This appears to be Pentium-microcode behavior that modern Intel kept for binary compatibility — Bochs documents the same constants under its `BETTER_THAN_PENTIUM` flag (commented out by default).
+
+For emulator targets where the **guest** is older silicon (e.g. P6 / Pentium III) the trade-off may invert. Two compile-time opt-outs are provided:
+
+| Define `=1` | Effect |
+|---|---|
+| `X87_TRIG_FULL_PRECISION_PI` | `range_reduce` uses the full-precision π/2 continuation instead of the Pentium-truncated `0xC0000000`. Trig ops (fsin/fcos/fptan/fsincos) lose ~17 points of match rate against modern Intel. |
+| `X87_LOGEXP_FULL_PRECISION_LN2` | `f2xm1` uses the full-precision ln(2) continuation instead of `0xC0000000`. Drops f2xm1 ~4 points against modern Intel. |
+
+Both default to undefined (Pentium-truncated), which matches what the test oracle reports on modern Intel hardware.
+
 ## Building and testing
 
 The test harness in `test/` compares each implementation against a live x86 oracle (via NASM-generated inline-asm dispatchers). Build with `make` from `test/`. Override `CXXFLAGS` to add `-DX87_FORCE_HAND_ROLLED` to test the aarch64 code path on an x86 host. Cross-compile + qemu also works (see `test/x87aarch64_smoke.cpp`).

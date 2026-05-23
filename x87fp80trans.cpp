@@ -293,11 +293,15 @@ using fpextfast_t = fpext64_t;
         // compute v = delta from table entry
         fpextfast_t v = fpextfast_t(src) - s_table_u[g_index + R];
 
-        // multiply v by ln(2) so we can use the e^x Taylor series; do this in
-        // extended precision with Pentium-truncated ln(2) so the residual
-        // matches Intel's microcode chain.
+        // multiply v by ln(2); Pentium-truncated form matches modern Intel
+        // microcode (the test oracle). Opt out via X87_LOGEXP_FULL_PRECISION_LN2
+        // for emulators targeting P6 hardware (e.g. Xbox).
+#if defined(X87_LOGEXP_FULL_PRECISION_LN2) && X87_LOGEXP_FULL_PRECISION_LN2
+        fpext_t w = fpext_t(v) * fpext_t::ln2;
+#else
         static fpext_t const pentium_ln2(0xb17217f7d1cf79abull, 0xc0000000, -1, 0);
         fpext_t w = fpext_t(v) * pentium_ln2;
+#endif
         if (Debug) print_val("w", w);
 
         // Taylor series: this can be done in lower precision; start with h = w + coeff[0]
@@ -400,15 +404,16 @@ tiny:
     {
         uint16_t flags = 0;
         if (src.isdenorm()) flags |= X87SW_DENORM_EX;
-        // Pentium-truncated ln(2): only 2 bits of fraction below the 64-bit
-        // mantissa boundary (Bochs fpu_constant.h Pentium mode, ~67-bit
-        // precision). Intel's microcode uses this specific truncated
-        // constant, so matching it gives bit-exact f2xm1 results for the
-        // tiny-input path instead of fighting against an irreproducible
-        // full-precision residual.
+        // Pentium-truncated ln(2) matches modern Intel microcode (test
+        // oracle); opt out via X87_LOGEXP_FULL_PRECISION_LN2 for P6
+        // emulation targets (e.g. Xbox).
+#if defined(X87_LOGEXP_FULL_PRECISION_LN2) && X87_LOGEXP_FULL_PRECISION_LN2
+        fpext128_t prod = fpext128_t(src) * fpext128_t::ln2;
+#else
         static fpext128_t const pentium_ln2(
             0xb17217f7d1cf79abull, 0xc000000000000000ull, -1, 0, fpext128_t::low64_tag{});
         fpext128_t prod = fpext128_t(src) * pentium_ln2;
+#endif
         dst = round_fpext128_to_fp80(prod, read_x87_cw(), flags);
         flags |= X87SW_PRECISION_EX;
         if (dst.isdenorm() || dst.iszero()) flags |= X87SW_UNDERFLOW_EX;
