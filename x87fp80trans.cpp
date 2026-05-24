@@ -429,6 +429,9 @@ uint16_t fp80_t::x87_f2xm1(fp80_t const &src, fp80_t &dst)
 #else
 uint16_t fp80_t::x87_f2xm1(fp80_t const &src, fp80_t &dst)
 {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_unary(src, dst, &fp64_t::x87_f2xm1);
+#endif
     return x87_f2xm1_core<false>(src, dst);
 }
 #endif
@@ -477,6 +480,21 @@ static fp80_t int32_to_fp80(int32_t v)
 // Zero → dst1 = src, dst2 = -inf, sets #Z.
 // Infinity → dst1 = src, dst2 = +inf.
 //
+// X87_MATCH_XEFU=1 forces every x87 op to compute via fp64 (PPC libm-style)
+// with fp80 round-trip, matching the behavior of Microsoft's XEFU Xbox-
+// on-Xbox360 backwards-compat emulator. XEFU runs on PowerPC which lacks
+// native fp80, so its per-op "FP*Glue" routines route transcendentals
+// through PPC fp64 + libm and store the result back in the emulated fp80
+// stack via DoubleToExtended. Emulators that want bit-for-bit parity
+// with the original Xbox-360 backwards-compat experience (rather than
+// modern-Intel-x87 bit-exactness) should define this flag.
+//
+// Implies X87_FORCE_HAND_ROLLED (we route through hand-rolled entry
+// points which are easier to gate at a single place per op).
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU && !defined(X87_FORCE_HAND_ROLLED)
+#define X87_FORCE_HAND_ROLLED 1
+#endif
+
 #if defined(X87_FORCE_HAND_ROLLED)
 #define X87_HOST_HAS_FP80 0
 #elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
@@ -490,10 +508,24 @@ static fp80_t int32_to_fp80(int32_t v)
 extern uint16_t host_x87_unary       (fp80_t const &src, fp80_t &dst,                  int op);
 extern uint16_t host_x87_unary2      (fp80_t const &src, fp80_t &dst1, fp80_t &dst2,   int op);
 extern uint16_t host_x87_binary_trans(fp80_t const &a,   fp80_t const &b, fp80_t &dst, int op);
+#else
+// Hand-rolled path's fp64-roundtrip helpers — defined later in this file
+// but forward-declared here so the X87_MATCH_XEFU gates that appear in
+// the first hand-rolled function definitions (x87_f2xm1, etc.) can reach
+// them.
+static uint16_t via_fp64_unary  (fp80_t const &a, fp80_t &dst,
+                                 uint16_t (*fn)(fp64_t const &, fp64_t &));
+static uint16_t via_fp64_unary2 (fp80_t const &a, fp80_t &dst1, fp80_t &dst2,
+                                 uint16_t (*fn)(fp64_t const &, fp64_t &, fp64_t &));
+static uint16_t via_fp64_binary (fp80_t const &a, fp80_t const &b, fp80_t &dst,
+                                 uint16_t (*fn)(fp64_t const &, fp64_t const &, fp64_t &));
 #endif
 
 uint16_t fp80_t::x87_fxtract(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
 {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_unary2(src, dst1, dst2, &fp64_t::x87_fxtract);
+#endif
     if (src.isnan())
     {
         fp80_t q = src.issnan() ? fp80_t::make_qnan(src) : src;
@@ -546,6 +578,9 @@ uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
 //
 uint16_t fp80_t::x87_fscale(fp80_t const &a, fp80_t const &b, fp80_t &dst)
 {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_binary(a, b, dst, &fp64_t::x87_fscale);
+#endif
     if (a.isnan() || b.isnan())
     {
         bool snan = a.issnan() || b.issnan();
@@ -876,8 +911,18 @@ static uint16_t fprem_core_fp80(fp80_t const &src1, fp80_t const &src2, fp80_t &
     return flags | qbits;
 }
 
-uint16_t fp80_t::x87_fprem (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return fprem_core_fp80<false>(a, b, dst); }
-uint16_t fp80_t::x87_fprem1(fp80_t const &a, fp80_t const &b, fp80_t &dst) { return fprem_core_fp80<true>(a, b, dst);  }
+uint16_t fp80_t::x87_fprem (fp80_t const &a, fp80_t const &b, fp80_t &dst) {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_binary(a, b, dst, &fp64_t::x87_fprem);
+#endif
+    return fprem_core_fp80<false>(a, b, dst);
+}
+uint16_t fp80_t::x87_fprem1(fp80_t const &a, fp80_t const &b, fp80_t &dst) {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_binary(a, b, dst, &fp64_t::x87_fprem1);
+#endif
+    return fprem_core_fp80<true>(a, b, dst);
+}
 #endif
 #if X87_HOST_HAS_FP80
 uint16_t fp80_t::x87_fyl2x  (fp80_t const &a, fp80_t const &b, fp80_t &dst) { return host_x87_binary_trans(a, b, dst, 0); }
@@ -941,6 +986,9 @@ static FpType poly1_eval80(FpType const &x, std::array<FpType, Count> const &ter
 //
 uint16_t fp80_t::x87_fpatan(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
 {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_binary(src1, src2, dst, &fp64_t::x87_fpatan);
+#endif
     using fpext_t = fpext96_t;
 
     uint16_t flags = 0;
@@ -1297,6 +1345,9 @@ inline uint16_t fyl2x_polynomial(fpext128_t const &m, int k,
 //
 uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
 {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_binary(src1, src2, dst, &fp64_t::x87_fyl2x);
+#endif
     using fpext_t = fpext96_t;
 
     uint16_t flags = 0;
@@ -1422,6 +1473,9 @@ uint16_t fp80_t::x87_fyl2x(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
 //
 uint16_t fp80_t::x87_fyl2xp1(fp80_t const &src1, fp80_t const &src2, fp80_t &dst)
 {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_binary(src1, src2, dst, &fp64_t::x87_fyl2xp1);
+#endif
     using fpext_t = fpext96_t;
 
     uint16_t flags = 0;
@@ -1787,6 +1841,9 @@ inline int range_reduce(fp80_t const &src, fpext_t &y_out)
 
 uint16_t fp80_t::x87_fsin(fp80_t const &src, fp80_t &dst)
 {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_unary(src, dst, &fp64_t::x87_fsin);
+#endif
     uint16_t flags = src.isdenorm() ? X87SW_DENORM_EX : 0;
     if (src.isnan())
     {
@@ -1829,6 +1886,9 @@ uint16_t fp80_t::x87_fsin(fp80_t const &src, fp80_t &dst)
 
 uint16_t fp80_t::x87_fcos(fp80_t const &src, fp80_t &dst)
 {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_unary(src, dst, &fp64_t::x87_fcos);
+#endif
     uint16_t flags = src.isdenorm() ? X87SW_DENORM_EX : 0;
     if (src.isnan())
     {
@@ -1870,6 +1930,9 @@ uint16_t fp80_t::x87_fcos(fp80_t const &src, fp80_t &dst)
 }
 uint16_t fp80_t::x87_fsincos(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
 {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_unary2(src, dst1, dst2, &fp64_t::x87_fsincos);
+#endif
     // dst1 = cos, dst2 = sin (matches asm/test convention from fxtract-style
     // unary_2 ops). Reuse the single range reduction for efficiency.
     uint16_t flags = src.isdenorm() ? X87SW_DENORM_EX : 0;
@@ -1929,6 +1992,9 @@ uint16_t fp80_t::x87_fsincos(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
 
 uint16_t fp80_t::x87_fptan(fp80_t const &src, fp80_t &dst1, fp80_t &dst2)
 {
+#if defined(X87_MATCH_XEFU) && X87_MATCH_XEFU
+    return via_fp64_unary2(src, dst1, dst2, &fp64_t::x87_fptan);
+#endif
     // tan(x) = sin/cos. dst1 = 1.0 (per asm convention), dst2 = tan(x).
     uint16_t flags = src.isdenorm() ? X87SW_DENORM_EX : 0;
     if (src.isnan())
