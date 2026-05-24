@@ -1512,6 +1512,33 @@ uint16_t fp80_t::x87_fsqrt(fp80_t const &src, fp80_t &dst)
         mant <<= s;
         exp = 1 - FP80_EXPONENT_BIAS - s;
     }
+
+#if defined(__aarch64__)
+    // AArch64 has hardware fp64 fsqrt (~10 cycles) but no fp80. Lose ~11
+    // bits of precision vs the shift-and-subtract below — accuracy matches
+    // X87_MATCH_XEFU-class behavior (fp64 round-trip), which is what
+    // PowerPC-based original-Xbox emulators ship anyway. Runs ~15x faster
+    // than the 96-iter shift-and-subtract fallback.
+    //
+    // We pack the post-normalize fp80 mantissa (leading 1 at bit 63) and
+    // signed exponent directly into an fp64 — bypassing the even-exp dance
+    // the shift-and-subtract path needs but the HW fsqrt doesn't. fp80
+    // exponents outside fp64's range fall through to the C path; the upper
+    // limit ~2^1023 is far above any realistic guest input.
+    if (exp >= -1022 && exp <= 1023)
+    {
+        uint64_t frac = (mant & 0x7FFFFFFFFFFFFFFFULL) >> 11;
+        uint64_t bits = (uint64_t(exp + 1023) << 52) | frac;
+        double x_d;
+        std::memcpy(&x_d, &bits, sizeof(double));
+        double r_d = std::sqrt(x_d);
+        dst = fp80_t(fp64_t(r_d));
+        flags |= X87SW_PRECISION_EX;
+        return flags;
+    }
+    // exp outside fp64 range — fall through to portable C path.
+#endif
+
     // Now mant has MSB at bit 63; value = mant * 2^(exp - 63). For the
     // sqrt result-exponent to be a clean integer we need (exp - 63) even,
     // i.e. exp odd. If exp is even, shift mant right by 1 (track the lost
@@ -1534,6 +1561,7 @@ uint16_t fp80_t::x87_fsqrt(fp80_t const &src, fp80_t &dst)
     // 192-bit input is mant placed at bits 128..191 (i.e. xhi = mant in
     // 64 high bits, xlo = 0). We iterate 96 times, each time consuming the
     // top 2 bits of input.
+
     uint64_t   xhi = mant;
     uint64_t   xlo = 0;
     __uint128_t remainder = 0;

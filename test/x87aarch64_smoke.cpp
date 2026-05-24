@@ -90,12 +90,19 @@ int main()
         fp80_t::x87_fsqrt(four, r);
         check("sqrt(4.0) = 2.0", r, 0x4000, 0x8000000000000000ull);
     }
-    // sqrt(2.0) ~= 1.4142135623730950488 — exact 80-bit value
+    // sqrt(2.0) ~= 1.4142135623730950488
+    // On aarch64 the lib uses HW fp64 fsqrt (X87_MATCH_XEFU-class
+    // precision) so the lower 11 mantissa bits are zero. The C
+    // shift-and-subtract path produces the bit-exact fp80 value.
     {
         fp80_t two(0x8000000000000000ull, 0x4000);                        // 2.0
         fp80_t r;
         fp80_t::x87_fsqrt(two, r);
-        check("sqrt(2.0)", r, 0x3FFF, 0xB504F333F9DE6484ull);
+#if defined(__aarch64__)
+        check("sqrt(2.0)", r, 0x3FFF, 0xB504F333F9DE6800ull);              // fp64-precision
+#else
+        check("sqrt(2.0)", r, 0x3FFF, 0xB504F333F9DE6484ull);              // fp80-precision
+#endif
     }
 
     // Comparisons
