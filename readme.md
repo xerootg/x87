@@ -53,6 +53,7 @@ For emulator targets where the **guest** is older silicon (e.g. P6 / Pentium III
 |---|---|
 | `X87_TRIG_FULL_PRECISION_PI` | `range_reduce` uses the full-precision π/2 continuation instead of the Pentium-truncated `0xC0000000`. Trig ops (fsin/fcos/fptan/fsincos) lose ~17 points of match rate against modern Intel. |
 | `X87_LOGEXP_FULL_PRECISION_LN2` | `f2xm1` uses the full-precision ln(2) continuation instead of `0xC0000000`. Drops f2xm1 ~4 points against modern Intel. |
+| `X87_MATCH_XEFU` | Routes every hand-rolled transcendental + fxtract/fscale/fprem/fprem1 through the fp64 implementation (matches Microsoft's XEFU Xbox-on-360 emulator's `FP*Glue` design: PowerPC has no native fp80, so XEFU computes transcendentals in PPC fp64 + libm and stores back through fp80 round-trip). Implies `X87_FORCE_HAND_ROLLED`. Match rate against modern Intel drops drastically — the goal is parity with XEFU behavior, not bit-exact modern Intel. |
 
 Both default to undefined (Pentium-truncated), which matches what the test oracle reports on modern Intel hardware.
 
